@@ -12,30 +12,33 @@ app.use(express.json());
 
 async function NeftInvalidByDate(filePath){
   const state = {};
-  const content = await fsp.readFile(filePath, "utf8");
-
-  content.split("\n").forEach(line => {
-    line = line.trim();
-    if (!line) return;
-
-    const parts = line.split(",");
-    state[parts[0]] = parts.slice(1);
-  });
-  if(Object.keys(state).length === 0){
-    console.log("no invalid found")
-    return "no invalid found"
-  }else{
-
-    console.log(state)
-    return state;
+  try{
+    const content = await fsp.readFile(filePath, "utf8");
+    content.split("\n").forEach(line => {
+      line = line.trim();
+      if (!line) return;
+  
+      const parts = line.split(",");
+      state[parts[0]] = parts.slice(1);
+    });
+    if(Object.keys(state).length === 0){
+      console.log("no invalid found")
+      return "no invalid found"
+    }else{
+  
+      console.log(state)
+      return state;
+    }
+  }catch (err){
+    return "File not Found ... "
   }
+
 }
 
-
-// queue Replica API
 app.post('/api/neft-invalid', async (req, res) => {
   try {
     const { date } = req.body;
+    
     const resultState = await NeftInvalidByDate(`data/Neft_Invalid.txt.${date}`);
 
     res.json({
