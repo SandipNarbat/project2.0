@@ -47,6 +47,12 @@ function diffStates(oldState, newState) {
     }
   }
 
+  for (const key in oldState) {
+    if (!(key in newState)) {
+      deltas.push({ key, type: "deleted" });
+    }
+  }
+
   return deltas;
 }
 
@@ -78,7 +84,7 @@ async function readQueueState(filePath) {
     if (!line) return;
     if (line.includes("VV3Q")) return;
 
-    line = line.replace("NQKE", "-1");
+    line = line.replaceAll("NQKE", "-1");
 
     const parts = line.split(",");
     const key = parts[0];
@@ -86,7 +92,7 @@ async function readQueueState(filePath) {
     const metrics = parts.slice(1).map(v => {
       const num = parseInt(v.trim(), 10);
       if (isNaN(num)) return 0;
-      return (num >= 1 && num < 150) ? 0 : num;
+      return num;
     });
 
     state[key] = metrics;
@@ -124,9 +130,15 @@ function createWatcher(name, filePath, readerFn) {
 
   function broadcast(event, data) {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    const dead = [];
     for (const res of clients) {
-      res.write(payload);
+      try {
+        res.write(payload);
+      } catch {
+        dead.push(res);
+      }
     }
+    dead.forEach(res => clients.delete(res));
   }
 
   async function processFileChange() {
@@ -143,24 +155,31 @@ function createWatcher(name, filePath, readerFn) {
     }
   }
 
-  function start() {
+  async function start() {
     if (!fs.existsSync(filePath)) {
       console.error(`File not found: ${filePath}`);
-      return;
+      return false;
     }
 
-    readerFn(filePath).then(state => {
-      prevState = state;
-    });
+    try {
+      prevState = await readerFn(filePath);
+    } catch (err) {
+      console.error(`Failed to load initial state for ${name}: ${err.message}`);
+      return false;
+    }
 
     fs.watch(filePath, (eventType) => {
       if (eventType === "change") {
         if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(processFileChange, 100);
+        debounceTimer = setTimeout(() => {
+          debounceTimer = null;
+          processFileChange();
+        }, 100);
       }
     });
 
     console.log(`${name} watcher started`);
+    return true;
   }
 
   function addClient(res) {
@@ -194,12 +213,16 @@ const FILE_CONFIG = [
 ];
 const watchers = {};
 
-FILE_CONFIG.forEach(config => {
-  const fullPath = path.join(__dirname, config.path);
-  const watcher = createWatcher(config.name, fullPath, config.reader);
-  watcher.start();
-  watchers[config.name] = watcher;
-});
+(async () => {
+  for (const config of FILE_CONFIG) {
+    const fullPath = path.join(__dirname, config.path);
+    const watcher = createWatcher(config.name, fullPath, config.reader);
+    const started = await watcher.start();
+    if (started) {
+      watchers[config.name] = watcher;
+    }
+  }
+})();
 
 // --------------------------------------------------
 // Dynamic Per-File SSE Route
