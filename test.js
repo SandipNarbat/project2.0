@@ -1,261 +1,148 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { IconAlertCircle, IconAlertTriangle, IconWarning } from '../components/Icons';
+import './AlertPopup.css';
 
-const chokidar = require('chokidar');
-const fs = require('fs');
-const path = require('path');
-const { finished } = require('stream/promises');
-const readline = require('readline');
+const BellIcon = () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+        <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+    </svg>
+);
 
+const AlertPopup = ({ totalAlerts, criticalCount, highCount, onOpen, alertsList }) => {
+    const [visible, setVisible] = useState(false);     // popup toast visible
+    const [collapsed, setCollapsed] = useState(false); // collapsed into bell button
+    const [prevTotal, setPrevTotal] = useState(totalAlerts);
+    const timerRef = useRef(null);
 
-const WATCH_DIR = "/home/smartportal02/portal_data/"; 
-const DATE_FILE = path.join(WATCH_DIR, 'MFLAGS_D');
-const DEBOUNCE_DELAY = 1000;
-
-// State
-let CURRENT_DATE = null;
-let mergeTimeout;
-let watcher; 
-const pendingChanges = new Map();
-let GROUP_RULES = [];
-
-// Helper: Initialize Group Rules
-function initializeGroupRules(date) {
-    return [
-        { 
-            fileNames: [
-                `gateway_i.txt.${date}`, `gateway_I.txt.${date}`,
-                `gateway_a.txt.${date}`, `gateway_b.txt.${date}`, `gateway_c.txt.${date}`,
-                `gateway_d.txt.${date}`, `gateway_e.txt.${date}`, `gateway_f.txt.${date}`,
-                `gateway_g.txt.${date}`, `gateway_h.txt.${date}`, `gateway_j.txt.${date}`,
-                `gateway_k.txt.${date}`, `gateway_m.txt.${date}`, `gateway_n.txt.${date}`,
-                `gateway_p.txt.${date}`, `gateway_q.txt.${date}`
-            ], 
-            output: `gateway.txt_8app.${date}`,
-	isVertical: true 
-        },
-        {
-            fileNames: [`queue_buildup_i.txt.${date}`, `queue_buildup_I.txt.${date}`, `queue_buildup_a.txt.${date}`, `queue_buildup_b.txt.${date}`, `queue_buildup_c.txt.${date}`, `queue_buildup_d.txt.${date}`, `queue_buildup_e.txt.${date}`, `queue_buildup_f.txt.${date}`, `queue_buildup_g.txt.${date}`, `queue_buildup_h.txt.${date}`, `queue_buildup_j.txt.${date}`, `queue_buildup_k.txt.${date}`, `queue_buildup_m.txt.${date}`, `queue_buildup_n.txt.${date}`, `queue_buildup_p.txt.${date}`, `queue_buildup_q.txt.${date}`],
-            output: `status_queue_8app.txt.${date}`,
-	isVertical: true
-        },
-        {
-            fileNames: [`top_m.txt.${date}`, `top_s1.txt.${date}`, `top_s2.txt.${date}`, `top_s3.txt.${date}`, `top_s4.txt.${date}`, `top_s5.txt.${date}`, `top_s6.txt.${date}`, `top_s7.txt.${date}`, `top_s8.txt.${date}`],
-            output: `top_8apps.txt_1.${date}`,
-	isVertical: false
-        },
-        {
-            fileNames: [`topstat_m.txt.${date}`, `topstat_s1.txt.${date}`, `topstat_s2.txt.${date}`, `topstat_s3.txt.${date}`, `topstat_s4.txt.${date}`, `topstat_s5.txt.${date}`, `topstat_s6.txt.${date}`, `topstat_s7.txt.${date}`, `topstat_s8.txt.${date}`, `topstat_s9.txt.${date}`, `topstat_s10.txt.${date}`, `topstat_s11.txt.${date}`, `topstat_s12.txt.${date}`, `topstat_s13.txt.${date}`, `topstat_s14.txt.${date}`, `topstat_s15.txt.${date}`],
-            output: `topstat_8apps.txt.${date}`,
-            isVertical: false
-        },
-        {
-            fileNames: [`space_m.txt.${date}`, `space_s1.txt.${date}`, `space_s2.txt.${date}`, `space_s3.txt.${date}`, `space_s4.txt.${date}`, `space_s5.txt.${date}`, `space_s6.txt.${date}`, `space_s7.txt.${date}`, `space_s8.txt.${date}`, `space_s9.txt.${date}`, `space_s10.txt.${date}`, `space_s11.txt.${date}`, `space_s12.txt.${date}`, `space_s13.txt.${date}`, `space_s14.txt.${date}`, `space_s15.txt.${date}`],
-                output: `space_8apps.txt.${date}`,
-                    isVertical: false
-        },
-        {
-            fileNames: [`path_for_bu_files`, `bu_arka_i.txt.${date}`, `bu_arka_I.txt.${date}`, `bu_arka_a.txt.${date}`, `bu_arka_b.txt.${date}`, `bu_arka_b.txt.${date}`, `bu_arka_d.txt.${date}`, `bu_arka_e.txt.${date}`, `bu_arka_f.txt.${date}`, `bu_arka_g.txt.${date}`],
-                output: `bu_arka.txt.${date}`,
-                    isVertical: true
+    // Trigger popup whenever alert count changes (and > 0)
+    useEffect(() => {
+        if (totalAlerts > 0 && totalAlerts !== prevTotal) {
+            showPopup();
         }
-    ];
-}
-
-function readDateFromFile() {
-    try {
-        if (!fs.existsSync(DATE_FILE)) {
-            console.warn(`Date file ${DATE_FILE} not found. Using system date.`);
-            return new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        // Also show on first load if there are alerts
+        if (prevTotal === 0 && totalAlerts > 0 && !visible && !collapsed) {
+            showPopup();
         }
-        return fs.readFileSync(DATE_FILE, 'utf8').trim();
-    } catch (err) {
-        console.error('Error reading date file:', err);
-        return new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    }
-}
+        setPrevTotal(totalAlerts);
+    }, [totalAlerts]);
 
-function getGroupsForFile(filePath) {
-    const fileName = path.basename(filePath);
-    const groups = [];
-    for (const rule of GROUP_RULES) {
-        if (rule.fileNames && rule.fileNames.includes(fileName)) {
-            groups.push({ output: rule.output, files: rule.fileNames });
+    // Show on mount if alerts exist
+    useEffect(() => {
+        if (totalAlerts > 0) {
+            showPopup();
         }
-    }
-    return groups;
-}
+    }, []);
 
-async function performMerge(fileList, outputFile) {
-    const validFiles = fileList
-        .map(f => path.join(WATCH_DIR, f)) // Ensure full path
-        .filter(f => fs.existsSync(f));
-    
-    if (validFiles.length === 0) {
-        console.log(`No input files found for ${outputFile}.`);
-        return;
-    }
+    const showPopup = () => {
+        setCollapsed(false);
+        setVisible(true);
+        clearTimeout(timerRef.current);
+        // Auto-dismiss after 5 seconds → collapse into bell
+        timerRef.current = setTimeout(() => {
+            setVisible(false);
+            setCollapsed(true);
+        }, 5000);
+    };
 
-    const output = fs.createWriteStream(path.join(WATCH_DIR, outputFile));
-    const readers = validFiles.map(file => {
-        const stream = fs.createReadStream(file);
-        const rl = require('readline').createInterface({ input: stream, crlfDelay: Infinity });
-        return rl[Symbol.asyncIterator]();
-    });
+    const handleDismiss = () => {
+        clearTimeout(timerRef.current);
+        setVisible(false);
+        setCollapsed(true);
+    };
 
-    let hasMoreLines = true;
-    try {
-        while (hasMoreLines) {
-            const linePromises = readers.map(iter => iter.next());
-            const results = await Promise.all(linePromises);
-            const lines = results.map(res => res.done ? '' : res.value);
-            
-            if (results.every(res => res.done)) break;
-            output.write(lines.join(',') + '\n');
-        }
-        output.end();
-        await finished(output);
-        console.log(`[${new Date().toLocaleTimeString()}] Merged ${validFiles.length} files into ${outputFile}`);
-    } catch (err) {
-        console.error('Merge error:', err);
-        output.destroy(err);
-        throw err;
-    }
-}
+    const handleBellClick = () => {
+        setCollapsed(false);
+        if (onOpen) onOpen(); // optionally scroll/open full panel
+        showPopup();
+    };
 
-async function performMerge2(fileList, outputFile) {
-    const validFiles = fileList
-        .map(f => path.join(WATCH_DIR, f))
-        .filter(f => fs.existsSync(f));
+    if (totalAlerts === 0) return null;
 
-    if (validFiles.length === 0) {
-        console.log(`No input files found for ${outputFile}.`);
-        return;
-    }
-    
-    const outputPath = path.join(WATCH_DIR, outputFile);
-    const tmpPath = outputPath + `.tmp.${process.pid}`;
-    const output = fs.createWriteStream(tmpPath);
+    return (
+        <>
+            {/* Toast Popup */}
+            <div className={`alert-popup ${visible ? 'popup-enter' : 'popup-exit'}`}>
+                <div className="popup-header">
+                    <span className="popup-title">⚠ Queue Buildup Alerts</span>
+                    <button className="popup-close" onClick={handleDismiss}>✕</button>
+                </div>
 
-    try {
-        for (const file of validFiles) {
-            const stream = fs.createReadStream(file);
-            const rl = readline.createInterface({
-                input: stream,
-                crlfDelay: Infinity
-            });
+                <div className="queue-alert">
 
-            for await (const line of rl) {
-                const clean = line.replace(/\u0000/g, '').replace(/\r/g, '').trimEnd();
+                    <div className="middle-queue">
+                        <div className="total-que red">
+                            <h2>{totalAlerts}</h2>
+                            <p className='white'>TOTAL ALERTS</p>
+                        </div>
 
-                if(!clean) continue;
-                output.write(clean + '\n');
-            }            
-            await finished(stream); 
-        }
+                        <div className='line'></div>
 
-        output.end();
-        await finished(output);
-	fs.renameSync(tmpPath, outputPath);
-        console.log(`[${new Date().toLocaleTimeString()}] Merged ${validFiles.length} files into ${outputFile}`);
-    } catch (err) {
-        console.error('Merge error:', err);
-        output.destroy(err);
-        throw err;
-    }
-}
-const mergeLocks = new Map();
-async function performGroupMerge(outputFile, inputFiles, isVertical) {
-    const prior = mergeLocks.get(outputFile) || Promise.resolve();
-    const run = prior.then(()=>isVertical ? performMerge(Array.from(inputFiles), outputFile): performMerge2(Array.from(inputFiles), outputFile));
-    mergeLocks.set(outputFile, run.catch(()=> {}));
-    return run;
-}
+                        <div className="que-block">
+                            <div className="icon"><IconAlertTriangle /></div>
+                            <div className='middle-block red'>
+                                <h2>{criticalCount}</h2>
+                                <p>CRITICAL</p>
+                                <p className='white'>{"> 500"}</p>
+                            </div>
+                        </div>
 
-async function processQueue() {
-    if (pendingChanges.size === 0) return;
-    const promises = [];
-    for (const [outputFile, {isVertical, fileNames}] of pendingChanges.entries()) {
-        promises.push(performGroupMerge(outputFile, fileNames, isVertical));
-    }
-    pendingChanges.clear();
-    await Promise.all(promises);
-}
+                        <div className='line'></div>
 
-function handleFileEvent(filePath) {
-    const fileName = path.basename(filePath);
-    if (fileName === path.basename(DATE_FILE)) return;
+                        <div className="que-block">
+                            <div className="icon"><IconAlertCircle /></div>
+                            <div className='middle-block orange'>
+                                <h2>{highCount}</h2>
+                                <p>HIGH</p>
+                                <p className='white'>{"200 - 499"}</p>
+                            </div>
+                        </div>
+                    </div>
 
-    const groups = getGroupsForFile(filePath);
-    if (groups.length === 0) return;
+                    <div className="lower-queue">
+                        <p>TOP QUEUE BUILDUPS</p>
+                        <div className="queue-tiles">
+                            {alertsList.map((alert, index) => {
+                                const { key, value, serverIndex, isCritical } = alert;
 
-    groups.forEach(({ output, files }) => {
-        if (!pendingChanges.has(output)) {
-            const rule = GROUP_RULES.find(r => r.output === output);
-            pendingChanges.set(output, {isVertical: rule.isVertical, 
-                fileNames: new Set(files)})
-        }
-    });
+                                const tileClass = isCritical ? 'tile-red' : 'tile-orange';
+                                const serverClass = isCritical ? 'server-red' : 'server-orange';
+                                const uniqueKey = `${key}-${serverIndex}-${index}`;
 
-    clearTimeout(mergeTimeout);
-    mergeTimeout = setTimeout(() => processQueue().catch(console.error), DEBOUNCE_DELAY);
-}
+                                return (
+                                    <div key={uniqueKey} className={`tile ${tileClass}`}>
+                                        <div className='tile-'>
+                                            <h3>{key}</h3>
+                                            <h3 className={serverClass}>{serverIndex === 0 ? 'M' : `S${serverIndex}`}</h3>
+                                        </div>
+                                        <h1>{value}</h1>
+                                    </div>
+                                );
+                            })}
 
-async function handleDateRollover() {
-    const newDate = readDateFromFile();
-    if (newDate !== CURRENT_DATE) {
-        console.log(`\n--- DATE ROLLOVER: ${CURRENT_DATE} -> ${newDate} ---`);
-        CURRENT_DATE = newDate;
-        GROUP_RULES = initializeGroupRules(CURRENT_DATE);
-        pendingChanges.clear();
-        clearTimeout(mergeTimeout);
+                            {alertsList.length === 0 && (
+                                <p style={{ color: 'green' }}>No alerts found.</p>
+                            )}
+                        </div>
+                    </div>
+                </div>
 
-        for (const rule of GROUP_RULES) {
-            pendingChanges.set(rule.output, {isVertical: rule.isVertical, 
-                fileNames: new Set(rule.fileNames)});
-        }
-        await processQueue();
-    }
-}
-async function init() {
-    CURRENT_DATE = readDateFromFile();
-    GROUP_RULES = initializeGroupRules(CURRENT_DATE);
+                <div className="popup-footer">
+                    <div className="popup-timer-bar" />
+                    <span className="popup-hint">Dismissing in 5s…</span>
+                </div>
+            </div>
 
-    // Watcher configuration
-    watcher = chokidar.watch(WATCH_DIR, {
-        ignored: (filePath) => {
-            const name = path.basename(filePath);
-            if (name === path.basename(DATE_FILE)) return false;
-            if (name.startsWith('.')) return true;
-            if (GROUP_RULES.some(r => r.output === name)) return true;
-            return name.startsWith('.') && name !== path.basename(DATE_FILE);
-        },
-        persistent: true,
-        ignoreInitial: true,
-        awaitWriteFinish: { stabilityThreshold: 2000, pollInterval: 100 },
-        usePolling: false, // Set to true if watching network drives
-        interval: 1000
-    });
+            {/* Bell button — shown after popup collapses */}
+            {collapsed && (
+                <button className="alert-bell-btn" onClick={handleBellClick} title="View alerts">
+                    <BellIcon />
+                    <span className="bell-badge">{totalAlerts}</span>
+                </button>
+            )}
+        </>
+    );
+};
 
-    watcher
-        .on('add', handleFileEvent)
-        .on('change', (filePath) => {
-            if (path.basename(filePath) === path.basename(DATE_FILE)) handleDateRollover();
-            else handleFileEvent(filePath);
-        })
-        .on('unlink', handleFileEvent)
-        .on('error', error => console.error('Watcher error:', error));
-
-    watcher.on('ready', async () => {
-        console.log('Initial scan complete. Triggering startup merge...');
-        for (const rule of GROUP_RULES) {
-            pendingChanges.set(rule.output, {isVertical: rule.isVertical, 
-                fileNames: new Set(rule.fileNames)});
-        }
-        await processQueue();
-        console.log('Startup merge complete. Now watching for changes... Press Ctrl+C to stop.');
-        
-        if (process.stdin.isTTY) {
-            process.stdin.pause(); 
-        }
-    });
-}
-module.exports = { init } ;
+export default AlertPopup;
