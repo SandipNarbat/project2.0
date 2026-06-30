@@ -15,6 +15,36 @@ const AlertPopup = ({ totalAlerts, criticalCount, highCount, onOpen, alertsList 
     const [collapsed, setCollapsed] = useState(false); // collapsed into bell button
     const [prevTotal, setPrevTotal] = useState(totalAlerts);
     const timerRef = useRef(null);
+    const alarmRef = useRef(null);
+
+    // Initialise alarm sound and unlock audio on first user interaction.
+    // Browsers block programmatic audio until the user has interacted with the page.
+    useEffect(() => {
+        alarmRef.current = new Audio('/alarm.wav');
+        alarmRef.current.load();
+
+        const unlock = () => {
+            const a = alarmRef.current;
+            if (!a) return;
+            a.play().then(() => { a.pause(); a.currentTime = 0; }).catch(() => {});
+            window.removeEventListener('click', unlock);
+            window.removeEventListener('keydown', unlock);
+        };
+        window.addEventListener('click', unlock);
+        window.addEventListener('keydown', unlock);
+
+        return () => {
+            window.removeEventListener('click', unlock);
+            window.removeEventListener('keydown', unlock);
+        };
+    }, []);
+
+    const playAlarm = () => {
+        const a = alarmRef.current;
+        if (!a) return;
+        a.currentTime = 0; // rewind so rapid alerts always replay
+        a.play().catch((err) => console.warn('Alarm blocked:', err));
+    };
 
     // Trigger popup whenever alert count changes (and > 0)
     useEffect(() => {
@@ -36,6 +66,7 @@ const AlertPopup = ({ totalAlerts, criticalCount, highCount, onOpen, alertsList 
     }, []);
 
     const showPopup = () => {
+        playAlarm(); // 🔊 sound the alarm whenever an alert surfaces
         setCollapsed(false);
         setVisible(true);
         clearTimeout(timerRef.current);
