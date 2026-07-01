@@ -1,22 +1,21 @@
 
 const chokidar = require('chokidar');
 const fs = require('fs');
+const fsp = require('fs/promises');
 const path = require('path');
-const { finished } = require('stream/promises');
-const readline = require('readline');
 const util = require('util');
 const { exec } = require('child_process')
 
 
 const WATCH_DIR = "/home/smartportal02/portal_data/";
 const DATE_FILE = path.join(WATCH_DIR, 'MFLAGS_D');
-const DEBOUNCE_DELAY = 1000;
+const DEBOUNCE_DELAY = 300;
 
 // State
 let CURRENT_DATE = null;
-let mergeTimeout;
 let watcher;
 const pendingChanges = new Map();
+const mergeTimers = new Map();
 let GROUP_RULES = [];
 
 // Helper: Initialize Group Rules
@@ -92,9 +91,12 @@ function getGroupsForFile(filePath) {
     return groups;
 }
 
+// Horizontal (column) merge: line N of every file joined by commas.
+// Reads each file fully in one shot (narrow read/write race window) then zips
+// in memory, and swaps the result in atomically via a temp file + rename.
 async function performMerge(fileList, outputFile) {
     const validFiles = fileList
-        .map(f => path.join(WATCH_DIR, f)) // Ensure full path
+        .map(f => path.join(WATCH_DIR, f))
         .filter(f => fs.existsSync(f));
 
     if (validFiles.length === 0) {
@@ -102,76 +104,82 @@ async function performMerge(fileList, outputFile) {
         return;
     }
 
-    const output = fs.createWriteStream(path.join(WATCH_DIR, outputFile));
-    const readers = validFiles.map(file => {
-        const stream = fs.createReadStream(file);
-        const rl = require('readline').createInterface({ input: stream, crlfDelay: Infinity });
-        return rl[Symbol.asyncIterator]();
-    });
+    const finalPath = path.join(WATCH_DIR, outputFile);
+    const tmpPath = `${finalPath}.tmp`;
 
-    let hasMoreLines = true;
+    const perFileLines = await Promise.all(
+        validFiles.map(async (file) => {
+            const raw = await fsp.readFile(file, 'utf8');
+            const lines = raw.split('\n');
+            if (lines.length && lines[lines.length - 1] === '') lines.pop();
+            return lines;
+        })
+    );
+
+    const maxRows = Math.max(...perFileLines.map(l => l.length));
+    const out = [];
+    for (let r = 0; r < maxRows; r++) {
+        const row = perFileLines.map(lines => lines[r] ?? '');
+        out.push(row.join(','));
+    }
+
+    const body = out.length ? out.join('\n') + '\n' : '';
     try {
-        while (hasMoreLines) {
-            const linePromises = readers.map(iter => iter.next());
-            const results = await Promise.all(linePromises);
-            const lines = results.map(res => res.done ? '' : res.value);
-
-            if (results.every(res => res.done)) break;
-            output.write(lines.join(',') + '\n');
-        }
-        output.end();
-        await finished(output);
+        await fsp.writeFile(tmpPath, body);
+        await fsp.rename(tmpPath, finalPath);
         console.log(`[${new Date().toLocaleTimeString()}] Merged ${validFiles.length} files into ${outputFile}`);
     } catch (err) {
         console.error('Merge error:', err);
-        output.destroy(err);
+        await fsp.unlink(tmpPath).catch(() => { });
         throw err;
     }
 }
 
+// Vertical (concatenation) merge: files stacked one after another.
+// Reads each file fully (fast, narrow race window vs. line-by-line streaming),
+// cleans null bytes / CR / trailing blanks, drops empty lines, then writes
+// atomically via a temp file + rename.
 async function performMerge2(fileList, outputFile) {
-        const validFiles = fileList
-                .map(f => path.join(WATCH_DIR, f))
-                .filter(f => fs.existsSync(f));
+    const validFiles = fileList
+        .map(f => path.join(WATCH_DIR, f))
+        .filter(f => fs.existsSync(f));
 
-        if (validFiles.length === 0) {
-                console.log(`No input files found for ${outputFile}.`);
-                return;
-        }
+    if (validFiles.length === 0) {
+        console.log(`No input files found for ${outputFile}.`);
+        return;
+    }
 
-        const outputPath = path.join(WATCH_DIR, outputFile);
-        const output = fs.createWriteStream(outputPath);
+    const finalPath = path.join(WATCH_DIR, outputFile);
+    const tmpPath = `${finalPath}.tmp`;
 
-        try {
-                for (const file of validFiles) {
-                        const stream = fs.createReadStream(file);
-                        const rl = readline.createInterface({
-                                input: stream,
-                                crlfDelay: Infinity
-                        });
+    const chunks = [];
+    for (const file of validFiles) {
+        const raw = await fsp.readFile(file, 'utf8');
+        const cleaned = raw
+            .split('\n')
+            .map(l => l.replace(/\u0000/g, '').replace(/\r/g, '').trimEnd())
+            .filter(l => l)
+            .join('\n');
+        if (cleaned) chunks.push(cleaned);
+    }
 
-                        for await (const line of rl) {
-                                const clean = line.replace(/\u0000/g, '').replace(/\r/g, '').trimEnd();
-
-                                if (!clean) continue;
-                                output.write(clean + '\n');
-                        }
-
-                        await finished(stream);
-                }
-
-                output.end();
-                await finished(output);
-                console.log(`[${new Date().toLocaleTimeString()}] Merged ${validFiles.length} files into ${outputFile}`);
-        } catch (err) {
-                console.error('Merge error:', err);
-                output.destroy(err);
-                throw err;
-        }
+    const body = chunks.length ? chunks.join('\n') + '\n' : '';
+    try {
+        await fsp.writeFile(tmpPath, body);
+        await fsp.rename(tmpPath, finalPath);
+        console.log(`[${new Date().toLocaleTimeString()}] Merged ${validFiles.length} files into ${outputFile}`);
+    } catch (err) {
+        console.error('Merge error:', err);
+        await fsp.unlink(tmpPath).catch(() => { });
+        throw err;
+    }
 }
 
 
 const execAsync = util.promisify(exec)
+// Concatenation via `cat`, written to a temp file then renamed atomically.
+// Paths are single-quoted (with embedded-quote escaping) to survive spaces and
+// shell metacharacters.
 async function performMerge3(fileList, outputFile) {
     const validFiles = fileList
         .map(f => path.join(WATCH_DIR, f))
@@ -182,15 +190,21 @@ async function performMerge3(fileList, outputFile) {
         return;
     }
 
-    const outputPath = path.join(WATCH_DIR, outputFile);
-    const files = validFiles.join(' ')
+    const finalPath = path.join(WATCH_DIR, outputFile);
+    const tmpPath = `${finalPath}.tmp`;
+
+    const shQuote = (p) => `'${p.replace(/'/g, `'\\''`)}'`;
+    const files = validFiles.map(shQuote).join(' ');
+
     try {
-        const { stdout, stderr } = await execAsync(`cat ${files} > ${outputPath}`);
-        console.log(`[${new Date().toLocaleTimeString()}] Merged ${validFiles.length} files into ${outputFile}`);
+        const { stderr } = await execAsync(`cat ${files} > ${shQuote(tmpPath)}`);
         if (stderr) {
-            console.error('Merge error:', stderr)
+            console.error('Merge error:', stderr);
         }
+        await fsp.rename(tmpPath, finalPath);
+        console.log(`[${new Date().toLocaleTimeString()}] Merged ${validFiles.length} files into ${outputFile}`);
     } catch (err) {
+        await fsp.unlink(tmpPath).catch(() => { });
         console.log(`[MERGE ERROR] ${err}`)
     }
 }
@@ -198,26 +212,43 @@ async function performMerge3(fileList, outputFile) {
 
 
 const mergeLocks = new Map();
+// Serialize merges per output file so two runs never write the same target at
+// once. Applies to every strategy, including the `cat` path.
 async function performGroupMerge(outputFile, inputFiles, isVertical, useCat) {
     const prior = mergeLocks.get(outputFile) || Promise.resolve();
-    if (!useCat) {
-        const run = prior.then(() => isVertical ? performMerge(Array.from(inputFiles), outputFile) : performMerge2(Array.from(inputFiles), outputFile));
-        mergeLocks.set(outputFile, run.catch(() => { }));
-        return run;
-    } else {
-        const run = performMerge3(Array.from(inputFiles), outputFile);
-        return run;
-    }
+    const run = prior.then(() => {
+        if (useCat) return performMerge3(Array.from(inputFiles), outputFile);
+        return isVertical
+            ? performMerge(Array.from(inputFiles), outputFile)
+            : performMerge2(Array.from(inputFiles), outputFile);
+    });
+    mergeLocks.set(outputFile, run.catch(() => { }));
+    return run;
+}
+
+// Per-group debounce so an unrelated, continuously-changing group can never
+// starve another group's merge (a single shared timer would keep resetting).
+function scheduleGroupMerge(output) {
+    clearTimeout(mergeTimers.get(output));
+    mergeTimers.set(output, setTimeout(() => {
+        mergeTimers.delete(output);
+        processQueue().catch(console.error);
+    }, DEBOUNCE_DELAY));
 }
 
 async function processQueue() {
     if (pendingChanges.size === 0) return;
-    const promises = [];
-    for (const [outputFile, { isVertical, useCat, fileNames }] of pendingChanges.entries()) {
-        promises.push(performGroupMerge(outputFile, fileNames, isVertical, useCat));
-    }
+    const batch = Array.from(pendingChanges.entries());
     pendingChanges.clear();
-    await Promise.all(promises);
+    await Promise.all(batch.map(async ([outputFile, entry]) => {
+        try {
+            await performGroupMerge(outputFile, entry.fileNames, entry.isVertical, entry.useCat);
+        } catch (err) {
+            console.error(`Merge failed for ${outputFile}, re-queueing:`, err);
+            if (!pendingChanges.has(outputFile)) pendingChanges.set(outputFile, entry);
+            scheduleGroupMerge(outputFile);
+        }
+    }));
 }
 
 function handleFileEvent(filePath) {
@@ -233,12 +264,10 @@ function handleFileEvent(filePath) {
             pendingChanges.set(output, {
                 isVertical: rule.isVertical, useCat: rule.useCat,
                 fileNames: new Set(files)
-            })
+            });
         }
+        scheduleGroupMerge(output);
     });
-
-    clearTimeout(mergeTimeout);
-    mergeTimeout = setTimeout(() => processQueue().catch(console.error), DEBOUNCE_DELAY);
 }
 
 async function handleDateRollover() {
@@ -248,7 +277,8 @@ async function handleDateRollover() {
         CURRENT_DATE = newDate;
         GROUP_RULES = initializeGroupRules(CURRENT_DATE);
         pendingChanges.clear();
-        clearTimeout(mergeTimeout);
+        for (const t of mergeTimers.values()) clearTimeout(t);
+        mergeTimers.clear();
 
         for (const rule of GROUP_RULES) {
             pendingChanges.set(rule.output, {
@@ -269,22 +299,28 @@ async function init() {
             const name = path.basename(filePath);
             if (name === path.basename(DATE_FILE)) return false;
             if (name.startsWith('.')) return true;
+            if (name.endsWith('.tmp')) return true;
             if (GROUP_RULES.some(r => r.output === name)) return true;
-            return name.startsWith('.') && name !== path.basename(DATE_FILE);
+            return false;
         },
         persistent: true,
         ignoreInitial: true,
-        awaitWriteFinish: { stabilityThreshold: 2000, pollInterval: 100 },
+        awaitWriteFinish: { stabilityThreshold: 400, pollInterval: 100 },
         usePolling: false, // Set to true if watching network drives
         interval: 1000
     });
 
+    const onEvent = (filePath) => {
+        if (path.basename(filePath) === path.basename(DATE_FILE)) {
+            handleDateRollover().catch(console.error);
+        } else {
+            handleFileEvent(filePath);
+        }
+    };
+
     watcher
-        .on('add', handleFileEvent)
-        .on('change', (filePath) => {
-            if (path.basename(filePath) === path.basename(DATE_FILE)) handleDateRollover();
-            else handleFileEvent(filePath);
-        })
+        .on('add', onEvent)
+        .on('change', onEvent)
         .on('unlink', handleFileEvent)
         .on('error', error => console.error('Watcher error:', error));
 
