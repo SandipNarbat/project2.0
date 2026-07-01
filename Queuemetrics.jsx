@@ -39,6 +39,24 @@ export default function QueueMetrics({ data, lastUpdated }) {
   const sourceData = data || {};
   const queueKeys = Object.keys(sourceData)
   const columns = Array.from({ length: 16 }, (_, i) => i === 0 ? "M" : `S${i}`);
+
+  // Rows containing any value greater than THRESHOLD float to the top, sorted
+  // by their highest value (highest first). All other rows keep their original
+  // order (Array.prototype.sort is stable).
+  const THRESHOLD = 200;
+  const rowMax = (key) => {
+    const row = sourceData[key];
+    if (!Array.isArray(row)) return -Infinity;
+    return row.reduce((m, v) => (typeof v === "number" && v > m ? v : m), -Infinity);
+  };
+  const sortedKeys = [...queueKeys].sort((a, b) => {
+    const aHot = rowMax(a) > THRESHOLD;
+    const bHot = rowMax(b) > THRESHOLD;
+    if (aHot && bHot) return rowMax(b) - rowMax(a);
+    if (aHot) return -1;
+    if (bHot) return 1;
+    return 0;
+  });
   const [showPopup, setShowPopup] = useState(false);
   const [showPopup2, setShowPopup2] = useState(false);
   const [queue, setQueue] = useState(null);
@@ -78,7 +96,7 @@ export default function QueueMetrics({ data, lastUpdated }) {
             </thead>
             <tbody>
               {queueKeys.length > 0 ? (
-                queueKeys.map((key) => {
+                sortedKeys.map((key) => {
                   const rowData = sourceData[key];
                   return (
                     <tr key={key} >
