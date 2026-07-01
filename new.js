@@ -9,7 +9,7 @@ const { exec } = require('child_process')
 
 const WATCH_DIR = "/home/smartportal02/portal_data/";
 const DATE_FILE = path.join(WATCH_DIR, 'MFLAGS_D');
-const DEBOUNCE_DELAY = 300;
+const DEBOUNCE_DELAY = 100;
 
 // State
 let CURRENT_DATE = null;
@@ -305,9 +305,14 @@ async function init() {
         },
         persistent: true,
         ignoreInitial: true,
-        awaitWriteFinish: { stabilityThreshold: 400, pollInterval: 100 },
-        usePolling: false, // Set to true if watching network drives
-        interval: 1000
+        // These files are written by other processes on shared storage, where
+        // inotify is unreliable/seconds-late. The old shell script was fast
+        // because it polled the disk directly in a tight loop — do the same here
+        // so changes are seen in near-realtime instead of 5-7s late.
+        usePolling: true,
+        interval: 300,
+        binaryInterval: 300,
+        awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 100 }
     });
 
     const onEvent = (filePath) => {
