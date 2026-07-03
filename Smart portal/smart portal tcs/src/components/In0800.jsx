@@ -1,15 +1,15 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { IconList, IconThumbDown, IconCross } from "./Icons";
 // import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-// import QueueReplica from "../blocks/QueueReplica";
+import QueueReplica from "../blocks/QueueReplica";
 function getPillClass(val) {
   if (val === 0) return "pill pill-zero";
   if (val <= 99) return "pill pill-yellow";
   if (val <= 499) return "pill pill-orange";
   return "pill pill-red";
 }
-function QueueAnimatedCell({ value }) {
+const QueueAnimatedCell = React.memo(function QueueAnimatedCell({ value }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
   useEffect(() => {
@@ -25,8 +25,8 @@ function QueueAnimatedCell({ value }) {
       <span>{value === -1 ? <IconThumbDown /> : value}</span>
     </td>
   );
-}
-export default function In0800({ data, lastUpdated }) {
+});
+function In0800({ data, lastUpdated }) {
   const sourceData = data || {};
   const queueKeys = Object.keys(sourceData)
 //   const columns = Array.from({ length: 16 }, (_, i) => i === 0 ? "M" : `S${i}`);
@@ -109,3 +109,4 @@ export default function In0800({ data, lastUpdated }) {
     </div>
   );
 }
+export default React.memo(In0800);

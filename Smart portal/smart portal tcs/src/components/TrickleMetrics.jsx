@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { IconList, IconThumbDown, IconCross } from "./Icons";
 import TrickleSummary from "../blocks/TrickleSummary"
-export default function TrickleMetrics({ data, lastUpdated }) {
+function TrickleMetrics({ data, lastUpdated }) {
     const sourceData = data || {};
     const keys = Object.keys(sourceData);
     const [showPopup, setShowPopup] = useState(false);
@@ -27,7 +27,7 @@ export default function TrickleMetrics({ data, lastUpdated }) {
             orderedKeys.unshift(lastKey);
         }
         return orderedKeys.map((key, index) => {
-            const values = sourceData[key];
+            const values = Array.isArray(sourceData[key]) ? sourceData[key] : [];
             const pairs = [];
             for (let i = 0; i < values.length; i += 2) {
                 pairs.push({
@@ -115,3 +115,4 @@ export default function TrickleMetrics({ data, lastUpdated }) {
         </div>
     );
 }
+export default React.memo(TrickleMetrics);

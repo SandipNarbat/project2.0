@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { IconList, IconThumbDown } from "../components/Icons";
-function QueueAnimatedCell({ value }) {
+const QueueAnimatedCell = React.memo(function QueueAnimatedCell({ value }) {
     const [highlight, setHighlight] = useState(false);
     const prev = useRef(value);
     useEffect(() => {
@@ -16,7 +16,7 @@ function QueueAnimatedCell({ value }) {
             <span>{value === -1 ? <IconThumbDown /> : value}</span>
         </td>
     );
-}
+});
 export default function DrLegend({ drdata }) {
     const sourceData = drdata || {};
     const queueKeys = Object.keys(sourceData)

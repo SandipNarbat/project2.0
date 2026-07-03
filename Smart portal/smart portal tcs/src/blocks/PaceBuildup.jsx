@@ -49,28 +49,32 @@ export default function PaceBuildup({ server }) {
     const today = DateFormatter(new Date())
     const servername = `pace_buildup_${ServerDQTType[server]}.txt.${today}`;
     useEffect(() => {
+        const ac = new AbortController();
         const fetchData = async () => {
             try {
                 const response = await fetch('http://localhost:8080/api/pace_buildup', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ flag: servername }),
+                    signal: ac.signal,
                 });
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                 const data = await response.json();
                 setReplicaData(data);
             } catch (error) {
-                console.error('POST request failed:', error);
+                if (error.name !== 'AbortError') console.error('POST request failed:', error);
             } finally {
-                setLoading(false);
+                if (!ac.signal.aborted) setLoading(false);
             }
         };
         fetchData();
+        return () => ac.abort();
     }, [server]);
     const dataEntries = replicaData?.data || {};
     const dataKeys = Object.keys(dataEntries)
     const head = dataEntries[1] || []
-    if (dataEntries.length === 0) {
+    // dataEntries is an object — the old `.length === 0` guard never fired.
+    if (dataKeys.length === 0) {
         return <div>NO data Found</div>;
     }
     return (
@@ -92,7 +96,7 @@ export default function PaceBuildup({ server }) {
                             return (
                                 <tr key={index}>
                                     {replicaIds.map((values, i) => (
-                                        <AlertColor value = {values} i = {i} />
+                                        <AlertColor value = {values} i = {i} key={i} />
                                     ))}
                                 </tr>
                             );

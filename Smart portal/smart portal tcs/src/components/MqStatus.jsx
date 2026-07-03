@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { IconCheck, IconWarning, IconError, IconLock, IconSlash, IconSnow, IconZap, IconGrid } from "./Icons";
 import './MqStatus.css'
 function renderJobCell(jobName, val) {
@@ -31,7 +31,7 @@ function renderJobCell(jobName, val) {
   }
   return <span>{val}</span>;
 }
-function GridAnimatedCell({ jobName, value }) {
+const GridAnimatedCell = React.memo(function GridAnimatedCell({ jobName, value }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
   useEffect(() => {
@@ -47,8 +47,8 @@ function GridAnimatedCell({ jobName, value }) {
       {renderJobCell(jobName, value)}
     </td>
   );
-}
-export default function MqStatus({ data , lastUpdated}) {
+});
+function MqStatus({ data , lastUpdated}) {
   const sourceData = data || {};
   const jobKeys = Object.keys(sourceData);
   // Fallback headers if data empty
@@ -102,3 +102,4 @@ export default function MqStatus({ data , lastUpdated}) {
     </div>
   );
 }
+export default React.memo(MqStatus);

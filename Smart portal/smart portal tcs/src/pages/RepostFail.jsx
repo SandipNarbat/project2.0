@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { IconCheck, IconDown, IconUp } from "../components/Icons";
 // import './RepostFail.css';
-function QueueAnimatedCell({ value }) {
+const QueueAnimatedCell = React.memo(function QueueAnimatedCell({ value }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
   useEffect(() => {
@@ -17,7 +17,7 @@ function QueueAnimatedCell({ value }) {
       <span>{value === -1 ? <IconUp /> : value}</span>
     </td>
   );
-}
+});
 export default function RepostFail({ data = {}, lastUpdated }) {
   const sourceData = data.neftRepostFailPage || {};
   const queueKeys = Object.keys(sourceData);

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { IconCheck, IconWarning, IconError, IconLock, IconSlash, IconSnow, IconZap, IconGrid, IconCross } from "./Icons";
 import GatewayMore from "../blocks/GatewayMore";
 function renderJobCell(jobName, val, index) {
@@ -48,7 +48,7 @@ function renderJobCell(jobName, val, index) {
   }
   return <span>{val}</span>;
 }
-function GridAnimatedCell({ jobName, value, index }) {
+const GridAnimatedCell = React.memo(function GridAnimatedCell({ jobName, value, index }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
   useEffect(() => {
@@ -64,8 +64,8 @@ function GridAnimatedCell({ jobName, value, index }) {
       {renderJobCell(jobName, value, index)}
     </td>
   );
-}
-export default function GridOverview({ data, lastUpdated }) {
+});
+function GridOverview({ data, lastUpdated }) {
   const sourceData = data || {};
   const jobKeys = Object.keys(sourceData);
     const [showPopup, setShowPopup] = useState(false);
@@ -146,3 +146,4 @@ export default function GridOverview({ data, lastUpdated }) {
     </div>
   );
 }
+export default React.memo(GridOverview);

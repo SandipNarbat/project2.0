@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { IconCheck, IconWarning, IconError, IconLock, IconSlash, IconSnow, IconZap, IconGrid, IconCross } from "./Icons";
 import './ActiveJobs.css'
-function GridAnimatedCell({ jobName, value, index }) {
+const GridAnimatedCell = React.memo(function GridAnimatedCell({ jobName, value, index }) {
     const [highlight, setHighlight] = useState(false);
     const prev = useRef(value);
     useEffect(() => {
@@ -17,7 +17,7 @@ function GridAnimatedCell({ jobName, value, index }) {
             <span>{value}</span>
         </td>
     );
-}
+});
 const list = {
     0: "M",
     1: "S1",
@@ -36,7 +36,7 @@ const list = {
     14: "S14",
     15: "S15",
 }
-export default function ActiveJobs({ data, lastUpdated }) {
+function ActiveJobs({ data, lastUpdated }) {
     const sourceDataM = data.activeJobM || {};
     const sourceDataS1 = data.activeJobS1 || {};
     const jobKeys = Object.keys(sourceDataM);
@@ -89,3 +89,4 @@ export default function ActiveJobs({ data, lastUpdated }) {
         </div>
     );
 }
+export default React.memo(ActiveJobs);

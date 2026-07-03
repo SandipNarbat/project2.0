@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { IconCheck, IconWarning, IconError, IconLock, IconSlash, IconSnow, IconZap, IconGrid } from "./Icons";
 import './MqStatus.css'
-function GridAnimatedCell({ value, i }) {
+const GridAnimatedCell = React.memo(function GridAnimatedCell({ value, i }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
   useEffect(() => {
@@ -33,8 +33,8 @@ function GridAnimatedCell({ value, i }) {
       </td>
     )
   };
-}
-export default function MiscTransactionCount({ data, lastUpdated, neftCount }) {
+});
+function MiscTransactionCount({ data, lastUpdated, neftCount }) {
   const sourceData = data || {};
   const sourceData2 = neftCount || {};
   const jobKeys = Object.keys(sourceData);
@@ -90,3 +90,4 @@ export default function MiscTransactionCount({ data, lastUpdated, neftCount }) {
     </div>
   );
 }
+export default React.memo(MiscTransactionCount);

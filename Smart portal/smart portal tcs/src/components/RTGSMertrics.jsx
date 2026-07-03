@@ -55,7 +55,7 @@ function RtgsOut({ value, i }) {
     <td><span>{value}</span></td>
   )
 }
-export default function RTGSMetrics({ data = {}, lastUpdated }) {
+function RTGSMetrics({ data = {}, lastUpdated }) {
   const RtgsIncoming = data.RtgsIncoming || {};
   const RtgsOutgoing = data.RtgsOutgoing || {};
   const rtgsIncomingPend = data.rtgsIncomingPend || {};
@@ -273,3 +273,21 @@ export default function RTGSMetrics({ data = {}, lastUpdated }) {
     </div>
   );
 }
+
+// This card receives the WHOLE data/lastUpdated objects (new refs every SSE
+// flush). Only re-render when one of the RTGS slices it actually reads changed.
+const RTGS_KEYS = [
+  "RtgsIncoming",
+  "RtgsOutgoing",
+  "rtgsIncomingPend",
+  "rtgsOutgoingPend",
+  "RTGSngingGateway12Apps",
+  "RTGSACKngingGateway12Apps",
+];
+export default React.memo(RTGSMetrics, (prev, next) =>
+  RTGS_KEYS.every(
+    (k) =>
+      prev.data?.[k] === next.data?.[k] &&
+      prev.lastUpdated?.[k] === next.lastUpdated?.[k]
+  )
+);

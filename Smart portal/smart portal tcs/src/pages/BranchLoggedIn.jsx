@@ -30,7 +30,7 @@ const CircleName = {
   "024": "AMRAVATHI",
   "027": "MUMBAI METRO ABU",
 };
-function QueueAnimatedCell({ value }) {
+const QueueAnimatedCell = React.memo(function QueueAnimatedCell({ value }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
   useEffect(() => {
@@ -46,7 +46,7 @@ function QueueAnimatedCell({ value }) {
       <span>{value}</span>
     </td>
   );
-}
+});
 export default function BranchLoggedIn({ data = {} }) {
   const sourceData = data.branchLoggedIn || {};
   const [open, setOpen] = useState(false);

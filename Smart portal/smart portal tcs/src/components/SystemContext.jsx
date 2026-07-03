@@ -1,11 +1,11 @@
 import { IconList } from "./Icons";
 import './SystemContext.css'
-export default function SystemContext({ data ,lastUpdated }) {
+function SystemContext({ data ,lastUpdated }) {
   const sourceData = data || {};
   const keys = Object.keys(sourceData);
   let maxCols = 0;
   keys.forEach(k => {
-    if (sourceData[k].length > maxCols) maxCols = sourceData[k].length;
+    if (Array.isArray(sourceData[k]) && sourceData[k].length > maxCols) maxCols = sourceData[k].length;
   });
   return (
     <div className="card system-context" style={{ height: '100%' }}>
@@ -60,3 +60,4 @@ export default function SystemContext({ data ,lastUpdated }) {
     </div>
   );
 }
+export default React.memo(SystemContext);

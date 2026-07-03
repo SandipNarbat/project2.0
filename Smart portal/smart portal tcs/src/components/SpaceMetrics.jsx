@@ -1,5 +1,5 @@
 import { IconList } from "./Icons";
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 function getPillClass(val) {
   if (val === 0) return "text-secondary opacity-50"; // Dim zeros/nulls
   if (val > 0 && val <= 20) return "text-green font-bold";
@@ -7,7 +7,7 @@ function getPillClass(val) {
   if (val > 50) return "text-red font-bold";
   return "";
 }
-function GridAnimatedCell({ value, index }) {
+const GridAnimatedCell = React.memo(function GridAnimatedCell({ value, index }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
   useEffect(() => {
@@ -23,8 +23,8 @@ function GridAnimatedCell({ value, index }) {
       <span className={getPillClass(value)}>{value}</span>
     </td>
   );
-}
-export default function SpaceMetrics({ data, lastUpdated }) {
+});
+function SpaceMetrics({ data, lastUpdated }) {
   const sourceData = data || {};
   const keys = Object.keys(sourceData);
   return (
@@ -83,3 +83,4 @@ export default function SpaceMetrics({ data, lastUpdated }) {
     </div>
   );
 }
+export default React.memo(SpaceMetrics);

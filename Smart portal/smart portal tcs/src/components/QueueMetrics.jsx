@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { IconList, IconThumbDown, IconCross } from "./Icons";
 // import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
@@ -10,7 +10,7 @@ function getPillClass(val) {
   if (val <= 499) return "pill pill-orange";
   return "pill pill-red";
 }
-function QueueAnimatedCell({ value }) {
+const QueueAnimatedCell = React.memo(function QueueAnimatedCell({ value }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
   useEffect(() => {
@@ -26,8 +26,8 @@ function QueueAnimatedCell({ value }) {
       <span className={getPillClass(value)}>{value === -1 ? <IconThumbDown /> : value}</span>
     </td>
   );
-}
-export default function QueueMetrics({ data, lastUpdated }) {
+});
+function QueueMetrics({ data, lastUpdated }) {
   const sourceData = data || {};
   const queueKeys = Object.keys(sourceData)
   const columns = Array.from({ length: 16 }, (_, i) => i === 0 ? "M" : `S${i}`);
@@ -35,19 +35,24 @@ export default function QueueMetrics({ data, lastUpdated }) {
   // by their highest value (highest first). All other rows keep their original
   // order (Array.prototype.sort is stable).
   const THRESHOLD = 200;
-  const rowMax = (key) => {
-    const row = sourceData[key];
-    if (!Array.isArray(row)) return -Infinity;
-    return row.reduce((m, v) => (typeof v === "number" && v > m ? v : m), -Infinity);
-  };
-  const sortedKeys = [...queueKeys].sort((a, b) => {
-    const aHot = rowMax(a) >= THRESHOLD;
-    const bHot = rowMax(b) >= THRESHOLD;
-    if (aHot && bHot) return rowMax(b) - rowMax(a);
-    if (aHot) return -1;
-    if (bHot) return 1;
-    return 0;
-  });
+  // Memoized: this sort used to run on EVERY render (i.e. every SSE flush),
+  // even when the queue data hadn't changed.
+  const sortedKeys = useMemo(() => {
+    const rowMax = (key) => {
+      const row = sourceData[key];
+      if (!Array.isArray(row)) return -Infinity;
+      return row.reduce((m, v) => (typeof v === "number" && v > m ? v : m), -Infinity);
+    };
+    return [...queueKeys].sort((a, b) => {
+      const aHot = rowMax(a) >= THRESHOLD;
+      const bHot = rowMax(b) >= THRESHOLD;
+      if (aHot && bHot) return rowMax(b) - rowMax(a);
+      if (aHot) return -1;
+      if (bHot) return 1;
+      return 0;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
   const [showPopup, setShowPopup] = useState(false);
   const [showPopup2, setShowPopup2] = useState(false);
   const [queue, setQueue] = useState(null);
@@ -129,3 +134,4 @@ export default function QueueMetrics({ data, lastUpdated }) {
     </div>
   );
 }
+export default React.memo(QueueMetrics);

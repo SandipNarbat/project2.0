@@ -5,19 +5,21 @@ export default function TrickleSummary() {
     const [loading, setLoading] = useState(true);
     const rows = Array.from({ length: 16 }, (_, i) => i === 0 ? "MASTER" : `SLAVE ${i}`);
     useEffect(() => {
+        const ac = new AbortController();
         const fetchData = async () => {
             try {
-                const response = await fetch('http://localhost:8080/api/trickle-summ');
+                const response = await fetch('http://localhost:8080/api/trickle-summ', { signal: ac.signal });
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                 const data = await response.json();
                 setTrickleSumm(data);
             } catch (error) {
-                console.error('POST request failed:', error);
+                if (error.name !== 'AbortError') console.error('GET request failed:', error);
             } finally {
-                setLoading(false);
+                if (!ac.signal.aborted) setLoading(false);
             }
         };
         fetchData();
+        return () => ac.abort();
     }, []);
     const dataEntries = trickleSumm?.data || {};
     const countkey = Object.keys(trickleSumm?.data || {});
@@ -25,8 +27,8 @@ export default function TrickleSummary() {
     const allkeys = Object.keys(trickleSumm?.data2 || {});
     const table3 = trickleSumm?.data3 || {};
     const table3keys = Object.keys(trickleSumm?.data3 || {});
-    console.log(alldataEntries)
-    if (dataEntries.length === 0) {
+    // dataEntries is an object — the old `.length === 0` guard never fired.
+    if (countkey.length === 0) {
         return <div>No data found</div>;
     }
     return (
@@ -75,7 +77,7 @@ export default function TrickleSummary() {
                                 return (
                                     <tr key={key}>
                                         {Array.isArray(rowData) ? rowData.slice(0, -1).map((val, i) => (
-                                            <td>{val}</td>
+                                            <td key={i}>{val}</td>
                                         )) : null}
                                     </tr>
                                 );
@@ -101,7 +103,7 @@ export default function TrickleSummary() {
                                         <td>{key}</td>
                                         {Array.isArray(rowData)
                                             ? rowData.map((val, i) => (
-                                                <td>{val}</td>
+                                                <td key={i}>{val}</td>
                                             ))
                                             : null}
                                     </tr>

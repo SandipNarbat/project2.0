@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { IconCheck, IconWarning, IconError, IconLock, IconSlash, IconSnow, IconZap, IconGrid } from "./Icons";
 import './MqStatus.css'
 function renderJobCell(jobName, val, index) {
@@ -11,7 +11,7 @@ function renderJobCell(jobName, val, index) {
  else{
   return <span>{val}</span>;
 }}
-function GridAnimatedCell({ jobName, value,index }) {
+const GridAnimatedCell = React.memo(function GridAnimatedCell({ jobName, value,index }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
   useEffect(() => {
@@ -27,13 +27,13 @@ function GridAnimatedCell({ jobName, value,index }) {
       {renderJobCell(jobName, value, index)}
     </td>
   );
-}
-export default function BatchUploads({ data , lastUpdated}) {
+});
+function BatchUploads({ data , lastUpdated}) {
   const sourceData = data || {};
   const keys = Object.keys(sourceData);
   let maxCols = 0;
   keys.forEach(k => {
-    if (sourceData[k].length > maxCols) maxCols = sourceData[k].length;
+    if (Array.isArray(sourceData[k]) && sourceData[k].length > maxCols) maxCols = sourceData[k].length;
   });
   return (
     <div className="batch-uploads">
@@ -83,3 +83,4 @@ export default function BatchUploads({ data , lastUpdated}) {
     </div>
   );
 }
+export default React.memo(BatchUploads);

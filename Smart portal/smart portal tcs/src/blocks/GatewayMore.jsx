@@ -11,27 +11,32 @@ export default function GatewayMore({ job }) {
     const [loading, setLoading] = useState(true);
     // const rows = Array.from({ length: 16 }, (_, i) => i === 0 ? "MASTER" : `SLAVE ${i}`);
     useEffect(() => {
+        const ac = new AbortController();
         const fetchData = async () => {
             try {
                 const response = await fetch('http://localhost:8080/api/jobs', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ jobName: job }),
+                    signal: ac.signal,
                 });
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                 const data = await response.json();
                 setJobData(data);
             } catch (error) {
-                console.error('POST request failed:', error);
+                if (error.name !== 'AbortError') console.error('POST request failed:', error);
             } finally {
-                setLoading(false);
+                if (!ac.signal.aborted) setLoading(false);
             }
         };
         fetchData();
+        return () => ac.abort();
     }, [job]);
     const dataEntries = jobData?.data || {};
     const dataEntriesKeys = Object.keys(jobData?.data || []);
-    if (dataEntries.length === 0) {
+    // dataEntries is an object — the old `dataEntries.length === 0` guard
+    // compared undefined and never triggered.
+    if (dataEntriesKeys.length === 0) {
         return <div>No data found </div>;
     }
     return (
@@ -41,9 +46,8 @@ export default function GatewayMore({ job }) {
                 {
                     dataEntriesKeys.map((key, index) => {
                         const gateway = dataEntries[key] || {}
-                        console.log(gateway)
                         return (
-                            <div className='queue-replica jobs'>
+                            <div className='queue-replica jobs' key={key}>
                                 <GatewayNames job = {job} i= {index}/>
                                 <div className="table-container gateway-container">
                                     <table className="queue-replica-table gateway-table">

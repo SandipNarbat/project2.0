@@ -1,15 +1,15 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { IconList, IconThumbDown, IconCross } from "./Icons";
 // import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-// import QueueReplica from "../blocks/QueueReplica";
+import QueueReplica from "../blocks/QueueReplica";
 function getPillClass(val) {
   if (val === 0) return "pill pill-zero";
   if (val <= 99) return "pill pill-yellow";
   if (val <= 499) return "pill pill-orange";
   return "pill pill-red";
 }
-function QueueAnimatedCell({ value }) {
+const QueueAnimatedCell = React.memo(function QueueAnimatedCell({ value }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
   useEffect(() => {
@@ -25,8 +25,8 @@ function QueueAnimatedCell({ value }) {
       <span>{value === -1 ? <IconThumbDown /> : value}</span>
     </td>
   );
-}
-export default function BR0501({ data, lastUpdated }) {
+});
+function BR0501({ data, lastUpdated }) {
   const sourceData = data || {};
   const queueKeys = Object.keys(sourceData)
 //   const columns = Array.from({ length: 16 }, (_, i) => i === 0 ? "M" : `S${i}`);
@@ -109,52 +109,4 @@ export default function BR0501({ data, lastUpdated }) {
     </div>
   );
 }
-/*
-=============================================================================
- EXPRESS API — server-side pagination for the branch table
- (no extra node modules beyond express/cors; reads a plain text/CSV file and
-  returns ONLY the entries needed for the requested page)
- Data file format — one branch per line:
-     srNo,branchCode,branchName,circleCode
- e.g.
-     1,00221,MUMBAI MAIN,002
-     2,00435,ANDHERI WEST,002
- Request:  GET /api/branches?page=1&limit=20&search=mumbai
- Response: { rows: [[srNo, branchCode, branchName, circleCode], ...],
-             total, page, limit }
- ---------------------------------------------------------------------------
- const express = require("express");
- const fsp = require("fs/promises");
- const cors = require("cors");
- const app = express();
- app.use(cors({ origin: ["http://localhost:5173"] }));
- const DATA_FILE = "branchLoggedIn.txt";
- app.get("/api/branches", async (req, res) => {
-   try {
-     const page   = Math.max(1, parseInt(req.query.page, 10) || 1);
-     const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-     const search = (req.query.search || "").toString().trim().toLowerCase();
-     const content = await fsp.readFile(DATA_FILE, "utf8");
-     let rows = content
-       .split("\n")
-       .map((l) => l.trim())
-       .filter(Boolean)
-       .map((l) => l.split(","));
-     if (search) {
-       rows = rows.filter((cols) => cols.join(" ").toLowerCase().includes(search));
-     }
-     const total = rows.length;
-     const start = (page - 1) * limit;
-     const pageRows = rows.slice(start, start + limit); // only the entries needed
-     res.json({ rows: pageRows, total, page, limit });
-   } catch (err) {
-     if (err.code === "ENOENT") {
-       return res.json({ rows: [], total: 0, page: 1, limit: 20 });
-     }
-     res.status(500).json({ error: "Failed to read branch data", details: err.message });
-   }
- });
- app.listen(5000, () => console.log("Branch API on http://localhost:5000"));
- ---------------------------------------------------------------------------
-=============================================================================
-*/
+export default React.memo(BR0501);

@@ -20,12 +20,12 @@ function Conditioning({ val, i, job }) {
     </td>
   )
 }
-export default function OcrNeft({ data, lastUpdated }) {
+function OcrNeft({ data, lastUpdated }) {
   const sourceData = data || {};
   const keys = Object.keys(sourceData);
   let maxCols = 0;
   keys.forEach(k => {
-    if (sourceData[k].length > maxCols) maxCols = sourceData[k].length;
+    if (Array.isArray(sourceData[k]) && sourceData[k].length > maxCols) maxCols = sourceData[k].length;
   });
   return (
     <div className="ocr-neft" style={{ height: '100%' }}>
@@ -61,8 +61,8 @@ export default function OcrNeft({ data, lastUpdated }) {
                 return (
                   <tr key={key}>
                     <td>{key}</td>
-                    {rowData.map((val, i) => (
-                      <Conditioning val={val} i={i} job={key} />
+                    {(Array.isArray(rowData) ? rowData : []).map((val, i) => (
+                      <Conditioning val={val} i={i} job={key} key={i} />
                     ))}
                     {Array.from({ length: maxCols - rowData.length }).map((_, i) => (
                       <td key={`empty-${i}`}>-</td>
@@ -81,3 +81,4 @@ export default function OcrNeft({ data, lastUpdated }) {
     </div>
   );
 }
+export default React.memo(OcrNeft);

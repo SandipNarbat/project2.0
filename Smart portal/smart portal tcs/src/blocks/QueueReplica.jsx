@@ -5,26 +5,28 @@ export default function QueueReplica({ queue }) {
     const [loading, setLoading] = useState(true);
     const rows = Array.from({ length: 16 }, (_, i) => i === 0 ? "MASTER" : `SLAVE ${i}`);
     useEffect(() => {
+        const ac = new AbortController();
         const fetchData = async () => {
             try {
                 const response = await fetch('http://localhost:8080/api/process-files', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ queue: queue }),
+                    signal: ac.signal,
                 });
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                 const data = await response.json();
                 setReplicaData(data);
             } catch (error) {
-                console.error('POST request failed:', error);
+                if (error.name !== 'AbortError') console.error('POST request failed:', error);
             } finally {
-                setLoading(false);
+                if (!ac.signal.aborted) setLoading(false);
             }
         };
         fetchData();
+        return () => ac.abort();
     }, [queue]);
     const dataEntries = Object.entries(replicaData?.data || {});
-    console.log(dataEntries)
     if (dataEntries.length === 0) {
         return <div>No replica data found for {queue}</div>;
     }

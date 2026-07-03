@@ -3,7 +3,6 @@ import { useState, useEffect } from 'react';
 // import "./UpiMr.css";
 export default function UpiMr({ data = {} }) {
   const sourceData = data.UpiMrMax || {};
-  console.log(sourceData)
   const dataKeys = sourceData ? Object.keys(sourceData) : [];
   return (
     <div className="container">

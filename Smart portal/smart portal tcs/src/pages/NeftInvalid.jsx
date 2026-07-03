@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { IconBranch, IconCopy, IconExcel, IconGraph, IconPdf, IconTeller, IconUp, IconDay, IconNight } from "../components/Icons";
 import "./NeftInvalid.css";
 import { useNavigate, useLocation } from 'react-router-dom';
-function QueueAnimatedCell({ value }) {
+const QueueAnimatedCell = React.memo(function QueueAnimatedCell({ value }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
   useEffect(() => {
@@ -18,7 +18,7 @@ function QueueAnimatedCell({ value }) {
       <span>{value}</span>
     </td>
   );
-}
+});
 const IconCalendar = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
@@ -50,21 +50,24 @@ export default function NeftInvalid({ data = {} }) {
   const [day, setDay] = useState(true);
   const finalDate = DateFormatter2(marketDate)
   useEffect(() => {
+    const ac = new AbortController();
     const fetchData = async () => {
       try {
         const response = await fetch('http://localhost:8080/api/neft-invalid', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ date: finalDate, isDay: day }),
+          signal: ac.signal,
         });
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const data = await response.json();
         setReplicaData(data);
       } catch (error) {
-        console.error('POST request failed:', error);
+        if (error.name !== 'AbortError') console.error('POST request failed:', error);
       }
     };
     fetchData();
+    return () => ac.abort();
   }, [finalDate, day]);
   const sourceData = replicaData?.data || {};
   const dataEntries = Object.entries(replicaData?.data || {});
@@ -99,13 +102,6 @@ export default function NeftInvalid({ data = {} }) {
       .toLowerCase()
       .includes(search.toLowerCase());
   });
-  const handleInputChange = (e) => {
-    setSearchInput(e.target.value);
-    const tableBody = document.getElementById('my-table');
-    if (tableBody) {
-      console.log("Table has", tableBody.rows.length, "rows");
-    }
-  };
   const [isVisible, setIsVisible] = useState(false);
   const toggleVisibility = () => {
     if (window.pageYOffset > 300) {
@@ -172,8 +168,9 @@ export default function NeftInvalid({ data = {} }) {
       tableHTML += `<tr>`;
       tableHTML += `<td>${key.toUpperCase()}</td>`;
       if (Array.isArray(rowData)) {
-        rowData.forEach((val, i) => {
+        rowData.forEach((val) => {
           const safeVal = String(val).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          tableHTML += `<td>${safeVal}</td>`;   // was computed but never appended → empty exports
         });
       }
       tableHTML += `</tr>`;

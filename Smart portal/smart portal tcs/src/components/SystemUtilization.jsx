@@ -1,6 +1,6 @@
 import { IconList } from "./Icons";
 import './SystemUtilization.css';
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 const cleanVal = (val) => val ? String(val).replace(/\u0000/g, '').trim() : val;
 function getBarColor(val) {
     const n = parseFloat(val);
@@ -24,7 +24,7 @@ function TimeStyle({ value, i }) {
 }
 function AlertColors() {
 }
-function GridAnimatedCell({ value, i }) {
+const GridAnimatedCell = React.memo(function GridAnimatedCell({ value, i }) {
     const clean = cleanVal(value);
     const [highlight, setHighlight] = useState(false);
     const prev = useRef(clean);
@@ -73,8 +73,8 @@ function GridAnimatedCell({ value, i }) {
             </td>
         )
     }
-}
-export default function SystemUtilization({ data, lastUpdated }) {
+});
+function SystemUtilization({ data, lastUpdated }) {
     const sourceData = data || {};
     const stations = Object.keys(sourceData);
     const MAX_VAL = 100;
@@ -142,3 +142,4 @@ export default function SystemUtilization({ data, lastUpdated }) {
         </div>
     );
 }
+export default React.memo(SystemUtilization);
