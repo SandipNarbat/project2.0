@@ -3,16 +3,42 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 const cors = require("cors");
-const EventEmitter = require("events");
-const backendEmitter = new EventEmitter();
 
 const app = express();
-const PORT = 8080;
+const PORT = Number(process.env.PORT) || 8080;
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || "http://localhost:5173,http://localhost:5174")
+  .split(",").map(s => s.trim()).filter(Boolean);
 
 app.use(cors({
-  origin: ["http://localhost:5173","http://localhost:5174"],
+  origin: CORS_ORIGINS,
   credentials: true
 }));
+app.use(express.json());
+
+// --------------------------------------------------
+// Unified SSE fan-out
+// --------------------------------------------------
+// All /events clients live in one Set. Payloads are stringified exactly once
+// per broadcast, regardless of how many clients are connected.
+
+const unifiedClients = new Set();
+
+function writeToClient(res, payload) {
+  try {
+    if (res.writableEnded || res.destroyed) return false;
+    return res.write(payload);
+  } catch {
+    return false;
+  }
+}
+
+// On the unified stream every message is named by its SOURCE; the inner
+// envelope's `type` field distinguishes snapshot/delta/etc.
+function sendUnifiedRaw(source, dataStr) {
+  if (unifiedClients.size === 0) return;
+  const payload = `event: ${source}\ndata: ${dataStr}\n\n`;
+  for (const res of unifiedClients) writeToClient(res, payload);
+}
 
 const MFLAGS_D_PATH = path.join(__dirname, "data", "MFLAGS_D");
 
@@ -748,7 +774,8 @@ async function readPaceBuildup(filePath) {
 async function readMflags_d(filePath) {
   const state = {};
   const content = await fsp.readFile(filePath, "utf8");
-  return state["MFLAGS_D"] = content.trim();
+  state["MFLAGS_D"] = content.trim();
+  return state;
 }
 
 //////////////////////////////////////// NIGHT ///////////////////////////////////////////////////////
@@ -798,11 +825,12 @@ function createWatcher(name, baseFilePath, readerFn, usesDateSuffix = false) {
   function broadcast(event, data) {
     const needsTimeStamp = event === "snapshot" || event === "delta";
     const envelope = needsTimeStamp ? { type: event, last_updated_time: lastUpdatedTime, payload: data } : data;
-    const ssePayload = `event: ${event}\ndata: ${JSON.stringify(envelope)}\n\n`;
+    const dataStr = JSON.stringify(envelope);   // stringified once for all clients
+    const ssePayload = `event: ${event}\ndata: ${dataStr}\n\n`;
     for (const res of clients) {
-      res.write(ssePayload);
+      writeToClient(res, ssePayload);
     }
-    backendEmitter.emit("change", { source: name, event, data: envelope });
+    sendUnifiedRaw(name, dataStr);
   }
 
   // ---- file processing -----------------------------------------------
@@ -813,7 +841,10 @@ function createWatcher(name, baseFilePath, readerFn, usesDateSuffix = false) {
       const deltas = diffStates(prevState, currState);
       if (deltas.length > 0) {
         lastUpdatedTime = GetTimeStamp();
-        deltas.forEach(delta => broadcast("delta", delta));
+        // ONE message per file change carrying ALL deltas — a full-file
+        // rewrite used to fan out as N separate SSE messages, each forcing a
+        // client-side parse + state update (the browser froze on bursts).
+        broadcast("delta", deltas);
         prevState = currState;
       }
     } catch (err) {
@@ -1075,11 +1106,7 @@ function startMflagsDWatcher() {
           }
 
           // Broadcast a global rollover event on the unified channel.
-          backendEmitter.emit("change", {
-            source: "MFLAGS_D",
-            event: "dateRollover",
-            data: { dateSuffix: newSuffix }
-          });
+          sendUnifiedRaw("MFLAGS_D", JSON.stringify({ type: "dateRollover", dateSuffix: newSuffix }));
         }
       } else if (eventType === "rename") {
         console.warn("[MFLAGS_D] Flag file removed. Polling for it…");
@@ -1119,11 +1146,7 @@ function startMflagsDWatcher() {
               await watchers[config.name].rolloverTo(newSuffix);
             }
           }
-          backendEmitter.emit("change", {
-            source: "MFLAGS_D",
-            event: "dateRollover",
-            data: { dateSuffix: newSuffix }
-          });
+          sendUnifiedRaw("MFLAGS_D", JSON.stringify({ type: "dateRollover", dateSuffix: newSuffix }));
         }
         attachMflagsWatch();
       }
@@ -1168,8 +1191,6 @@ app.get("/events/:source", (req, res) => {
 // Unified SSE Route
 // --------------------------------------------------
 
-app.use(express.json());
-
 app.get("/events", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -1177,27 +1198,33 @@ app.get("/events", (req, res) => {
 
   res.flushHeaders?.();
 
-  FILE_CONFIG.forEach(config => {
-    const watcher = watchers[config.name];
-    if (watcher) {
-      res.write(`event: ${config.name}\ndata: ${JSON.stringify({ type: "snapshot", last_updated_time: watcher.getLastUpdatedTime(), payload: watcher.getState() })}\n\n`);
-    }
-  });
-
-  const onChange = ({ source, event, data }) => {
-    res.write(`event: ${source}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
-
-  backendEmitter.on("change", onChange);
-
   const pingInterval = setInterval(() => {
-    res.write(": ping\n\n");
+    writeToClient(res, ": ping\n\n");
   }, 15000);
 
+  // Cleanup is registered BEFORE any write so a failed write can never leave
+  // a zombie client behind.
   req.on("close", () => {
     clearInterval(pingInterval);
-    backendEmitter.off("change", onChange);
+    unifiedClients.delete(res);
   });
+
+  // ONE init message carrying every source's current state — the client does
+  // a single parse + a single state update instead of 37 back-to-back
+  // snapshot messages (the old connect/reconnect burst froze the browser).
+  const sources = {};
+  for (const config of FILE_CONFIG) {
+    const watcher = watchers[config.name];
+    if (watcher) {
+      sources[config.name] = {
+        payload: watcher.getState(),
+        last_updated_time: watcher.getLastUpdatedTime(),
+      };
+    }
+  }
+  writeToClient(res, `event: init\ndata: ${JSON.stringify({ type: "init", sources })}\n\n`);
+
+  unifiedClients.add(res);
 });
 
 // queue Replica API
@@ -1270,8 +1297,6 @@ app.post("/api/jobs", async (req, res) => {
     res.status(500).json({ error: error.message })
   }
 });
-
-app.use(express.json());
 
 app.post('/api/neft-invalid', async (req, res) => {
   try {
