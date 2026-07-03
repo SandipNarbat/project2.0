@@ -12,6 +12,12 @@ export default function TopNavBar({ branchCount = "0", tellerCount = "0", repost
     return localStorage.getItem('theme') || 'dark';
   });
   useEffect(() => {
+    if (MFLAGS_D && /^\d{8}$/.test(MFLAGS_D)) {
+      const formatted = `${MFLAGS_D.slice(0, 4)}-${MFLAGS_D.slice(4, 6)}-${MFLAGS_D.slice(6, 8)}`;
+      setMarketDate(formatted);
+    }
+  }, [MFLAGS_D]);
+  useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
   }, [theme]);
@@ -39,7 +45,7 @@ export default function TopNavBar({ branchCount = "0", tellerCount = "0", repost
         </div>
         <div className="tabs-right">
           <div className="branch-log">
-            {location.pathname !== '/night' && (<div className={`badge dark ${location.pathname === '/branch-logged-in' ? 'active' : ''}`} onClick={() => navigate('/branch-logged-in')} style={{ cursor: 'pointer' }} className="teller branch">
+            {location.pathname !== '/night' && (<div className={`badge dark ${location.pathname === '/branch-logged-in' ? 'active' : ''} teller branch`} onClick={() => navigate('/branch-logged-in')} style={{ cursor: 'pointer' }}>
               <div className="circle"><div className="circle2"></div></div>
               <div className="inner-teller">
                 <span className='flag-label'>Branch logged in</span>

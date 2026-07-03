@@ -15,6 +15,16 @@ const AlertPopup = ({ totalAlerts, criticalCount, highCount, onOpen, alertsList 
     const [prevCriticalCount, SetPrevCriticalCount] = useState(criticalCount);
     const timerRef = useRef(null);
     const alarmRef = useRef(null);
+    const showPopup = () => {
+        setCollapsed(false);
+        setVisible(true);
+        clearTimeout(timerRef.current);
+        // Auto-dismiss after 5 seconds → collapse into bell
+        timerRef.current = setTimeout(() => {
+            setVisible(false);
+            setCollapsed(true);
+        }, 5000);
+    };
     useEffect(() => {
         alarmRef.current = new Audio('/alarm.wav');
         alarmRef.current.load();
@@ -64,16 +74,6 @@ const AlertPopup = ({ totalAlerts, criticalCount, highCount, onOpen, alertsList 
             showPopup();
         }
     }, []);
-    const showPopup = () => {
-        setCollapsed(false);
-        setVisible(true);
-        clearTimeout(timerRef.current);
-        // Auto-dismiss after 5 seconds → collapse into bell
-        timerRef.current = setTimeout(() => {
-            setVisible(false);
-            setCollapsed(true);
-        }, 5000);
-    };
     const handleDismiss = () => {
         clearTimeout(timerRef.current);
         setVisible(false);

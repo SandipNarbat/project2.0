@@ -1,6 +1,7 @@
 import { IconList } from "./Icons";
 import './SystemUtilization.css';
 import React, { useState, useEffect, useRef } from "react";
+// eslint-disable-next-line no-control-regex
 const cleanVal = (val) => val ? String(val).replace(/\u0000/g, '').trim() : val;
 function getBarColor(val) {
     const n = parseFloat(val);

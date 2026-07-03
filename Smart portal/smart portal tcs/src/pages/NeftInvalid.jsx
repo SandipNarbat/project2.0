@@ -31,7 +31,7 @@ function DateFormatter(marketDate) {
   const year = marketDate.getFullYear();
   const month = String(marketDate.getMonth() + 1).padStart(2, '0');
   const day = String(marketDate.getDate()).padStart(2, '0');
-  const formattedDate = `${year}${month}${day}`;
+  const formattedDate = `${year}-${month}-${day}`;
   return formattedDate
 }
 function DateFormatter2(marketDate) {
