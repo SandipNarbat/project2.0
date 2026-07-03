@@ -23,14 +23,43 @@ app.use(express.json());
 
 const unifiedClients = new Set();
 
+// Max bytes allowed to sit unread in a client's socket buffer. A consumer
+// that stops reading gets disconnected rather than growing server memory
+// unboundedly; EventSource auto-reconnects and receives a fresh init, which
+// fully resyncs it (dropping is safer than silently skipping deltas).
+const MAX_CLIENT_BUFFER_BYTES = 1_000_000;
+
 function writeToClient(res, payload) {
   try {
     if (res.writableEnded || res.destroyed) return false;
-    return res.write(payload);
+    const ok = res.write(payload);
+    if (!ok && res.socket && res.socket.writableLength > MAX_CLIENT_BUFFER_BYTES) {
+      console.warn("[sse] Dropping slow client (socket buffer over limit)");
+      res.destroy();   // 'close' fires → route handler removes it from its Set
+      return false;
+    }
+    return true;
   } catch {
+    try { res.destroy(); } catch { /* ignore */ }
     return false;
   }
 }
+
+// --------------------------------------------------
+// Process-level guards — this server must run 24/7
+// --------------------------------------------------
+// A stray rejection is logged and survived; an uncaught exception means
+// unknown state, so log and exit — run under run-server.sh (or systemd)
+// which restarts the process within seconds.
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[process] Unhandled rejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[process] Uncaught exception, exiting for supervisor restart:", err);
+  process.exit(1);
+});
 
 // On the unified stream every message is named by its SOURCE; the inner
 // envelope's `type` field distinguishes snapshot/delta/etc.
@@ -266,6 +295,15 @@ async function QueueBuildupReplica(folderPath, queue) {
 
   const txtFiles = files.filter(f => f.endsWith('.txt'));
 
+  // The match pattern depends only on `queue` — build it once, not per line.
+  const spacedQueue = queue.includes(" ");
+  let regex = null;
+  if (spacedQueue) {
+    const qparts = queue.split(" ");
+    regex = new RegExp(`${qparts[0].slice(0, -1)}.......${qparts[1]}`);
+  }
+  const plainNeedle = queue.slice(0, -1);
+
   for (const file of txtFiles) {
     const filePath = path.join(folderPath, file);
 
@@ -281,23 +319,11 @@ async function QueueBuildupReplica(folderPath, queue) {
       line = line.trim();
       if (!line) return;
 
-      if (queue.includes(" ")) {
-        const parts = queue.split(" ")
-        const pattern = `${parts[0].slice(0, -1)}.......${parts[1]}`;
-        const regex = new RegExp(pattern);
-        if (regex.test(line)) {
-          const parts = line.split(" ");
-          if (parts.length > 0) {
-            replicas.push(parts[0]);
-          }
-        }
-      }
-      else {
-        if (line.includes(queue.slice(0, -1))) {
-          const parts = line.split(" ");
-          if (parts.length > 0) {
-            replicas.push(parts[0]);
-          }
+      const hit = spacedQueue ? regex.test(line) : line.includes(plainNeedle);
+      if (hit) {
+        const parts = line.split(" ");
+        if (parts.length > 0) {
+          replicas.push(parts[0]);
         }
       }
 
@@ -332,7 +358,7 @@ async function readGatewayMore(gatewaypath) {
       const metrics = parts.slice(1).map(v => {
         return v.trim();
       });
-      state[key] = parts[1].trim();
+      state[key] = parts[1]?.trim() ?? "";
     });
     const masterName = path.basename(filePath, ".txt");
     result[masterName] = state;
@@ -449,7 +475,7 @@ async function readNeftOncomigCount(filePath) {
   const state = {};
   const content = await fsp.readFile(filePath, "utf8");
   const parts = content.split(",");
-  state["neft incoming count"] = parts[1].trim()
+  state["neft incoming count"] = parts[1]?.trim() ?? "";
   return state;
 }
 //branch logged in
@@ -484,7 +510,7 @@ async function readRepostingFail(filePath) {
 async function readNeftInvalidDN(filePath) {
   const state = {};
   const content = await fsp.readFile(filePath, "utf8");
-  if (!content) return;
+  if (!content) return state;
   const parts = content.split(':');
   state[parts[0]] = parts[1];
   return state;
@@ -494,7 +520,7 @@ async function readNeftInvalidDN(filePath) {
 async function ReadNeftCount(filePath) {
   const state = {};
   const content = await fsp.readFile(filePath, "utf8");
-  if (!content) return;
+  if (!content) return state;
 
   const parts = content.split(",");
   state["neft count"] = parts;
@@ -589,7 +615,7 @@ async function readUPIMR(filePath) {
 async function readrtgsngingGateway_12apps(filePath) {
   const state = {};
   const content = await fsp.readFile(filePath, "utf8");
-  if (!content) return;
+  if (!content) return state;
   const parts = content.split(",")
   state["01ERR 0546"] = parts;
   return state;
@@ -599,7 +625,7 @@ async function readrtgsngingGateway_12apps(filePath) {
 async function readrtgAcksngingGateway_12apps(filePath) {
   const state = {};
   const content = await fsp.readFile(filePath, "utf8");
-  if (!content) return;
+  if (!content) return state;
   const parts = content.split(",")
   state["01ERR 0146"] = parts;
   return state;
@@ -654,7 +680,7 @@ async function readRtgsOutgoing(filePath) {
 async function readBU(filePath) {
   const state = {};
   const content = await fsp.readFile(filePath, "utf8");
-  if (!content) return;
+  if (!content) return state;
 
   const parts = content.split(",");
   parts.push("NA")
@@ -805,7 +831,11 @@ function GetTimeStamp() {
   return new Date().toLocaleTimeString("en-GB", { hour12: false })
 }
 
-function createWatcher(name, baseFilePath, readerFn, usesDateSuffix = false) {
+// `passive` watchers share a file with a primary watcher: they keep their own
+// state/clients/broadcasts but never attach fs.watch or poll — the primary
+// triggers their processFileChange, so a shared file is only watched/read-
+// triggered once (previously data/rtgs.txt had two independent fs.watch).
+function createWatcher(name, baseFilePath, readerFn, usesDateSuffix = false, passive = false) {
   let prevState = {};
   let debounceTimer = null;
   const startUpTime = GetTimeStamp();
@@ -814,6 +844,7 @@ function createWatcher(name, baseFilePath, readerFn, usesDateSuffix = false) {
   let resurrectTimer = null;
   let activePath = baseFilePath;   // the path currently being watched
   const clients = new Set();
+  const followers = [];            // passive watchers sharing this file
 
   // ---- helpers --------------------------------------------------------
 
@@ -849,6 +880,9 @@ function createWatcher(name, baseFilePath, readerFn, usesDateSuffix = false) {
       }
     } catch (err) {
       broadcast("error", { error: err.message });
+    }
+    for (const follower of followers) {
+      follower.processFileChange().catch(() => { /* follower broadcasts its own error */ });
     }
   }
 
@@ -897,19 +931,29 @@ function createWatcher(name, baseFilePath, readerFn, usesDateSuffix = false) {
 
   function startResurrectionPolling() {
     if (resurrectTimer) return;   // already polling
+    let ticking = false;   // in-flight guard: a slow stat must not stack ticks
     resurrectTimer = setInterval(async () => {
-      if (fs.existsSync(activePath)) {
+      if (ticking) return;
+      ticking = true;
+      try {
+        // Async stat — 37 watchers doing existsSync every 5s on a network
+        // share was blocking the event loop.
+        const exists = await fsp.access(activePath).then(() => true, () => false);
+        if (!exists) return;
         clearInterval(resurrectTimer);
         resurrectTimer = null;
         console.log(`[${name}] File resurrected: ${activePath}. Restarting watcher.`);
         try {
           prevState = await readerFn(activePath);
+          lastUpdatedTime = GetTimeStamp();
           broadcast("snapshot", prevState);
           broadcast("fileResurrected", { path: activePath });
         } catch (err) {
           console.error(`[${name}] Error reading resurrected file: ${err.message}`);
         }
         attachFsWatch();
+      } finally {
+        ticking = false;
       }
     }, RESURRECTION_POLL_MS);
   }
@@ -920,6 +964,17 @@ function createWatcher(name, baseFilePath, readerFn, usesDateSuffix = false) {
     // Initialise activePath with the current date suffix (if applicable).
     if (usesDateSuffix && currentDateSuffix) {
       activePath = resolveActivePath(currentDateSuffix);
+    }
+
+    if (passive) {
+      // Initial read only — the primary watcher on this path drives updates.
+      readerFn(activePath).then(state => {
+        prevState = state;
+      }).catch(err => {
+        console.error(`[${name}] Initial read error: ${err.message}`);
+      });
+      console.log(`[${name}] Follower started (shares file with primary) → ${activePath}`);
+      return;
     }
 
     if (!fs.existsSync(activePath)) {
@@ -982,8 +1037,9 @@ function createWatcher(name, baseFilePath, readerFn, usesDateSuffix = false) {
   function removeClient(res) { clients.delete(res); }
   function getState() { return prevState; }
   function getLastUpdatedTime() { return lastUpdatedTime; }
+  function addFollower(watcher) { followers.push(watcher); }
 
-  return { start, addClient, removeClient, getState, rolloverTo, getLastUpdatedTime };
+  return { start, addClient, removeClient, getState, rolloverTo, getLastUpdatedTime, processFileChange, addFollower };
 }
 
 // --------------------------------------------------
@@ -994,7 +1050,9 @@ const FILE_CONFIG = [
   { name: "jobs", path: "data/jobs.txt_", reader: readJobsState, usesDateSuffix: true },
   { name: "queue", path: "data/queuebuilder.txt", reader: readQueueState, usesDateSuffix: false },
   { name: "trickle", path: "data/trickle.txt", reader: readTrickleMasterState, usesDateSuffix: false },
-  { name: "space", path: "data/jobs_data/space_8apps.txt.20260626", reader: readSpaceState, usesDateSuffix: false },
+  // Date-suffixed like jobs: the path previously hardcoded ".20260626" and
+  // would go permanently stale after that date.
+  { name: "space", path: "data/jobs_data/space_8apps.txt.", reader: readSpaceState, usesDateSuffix: true },
   { name: "context", path: "data/context.txt", reader: readSystemContextState, usesDateSuffix: false },
   { name: "system", path: "data/system_utilization.txt", reader: readSystemUtilizationState, usesDateSuffix: false },
   { name: "resourse", path: "data/high_resourse.txt", reader: readHighResourseState, usesDateSuffix: false },
@@ -1058,16 +1116,30 @@ const watchers = {};
     console.warn("[MFLAGS_D] Could not read MFLAGS_D — date-suffixed files will use base path until flag file appears.");
   }
 
+  // Group configs by resolved path: the first watcher on a file is the
+  // primary (owns fs.watch/polling); any further source on the same file
+  // becomes a follower the primary triggers (e.g. RtgsIncoming/RtgsOutgoing
+  // both read data/rtgs.txt — previously two independent fs.watch handles).
+  const primaryByPath = new Map();
   FILE_CONFIG.forEach(config => {
     const fullPath = path.join(__dirname, config.path);
-    const watcher = createWatcher(config.name, fullPath, config.reader, config.usesDateSuffix);
+    const primary = primaryByPath.get(fullPath);
+    const watcher = createWatcher(config.name, fullPath, config.reader, config.usesDateSuffix, Boolean(primary));
     watcher.start();
     watchers[config.name] = watcher;
+    if (primary) {
+      primary.addFollower(watcher);
+    } else {
+      primaryByPath.set(fullPath, watcher);
+    }
   });
 
   startMflagsDWatcher();
   startServer();
-})();
+})().catch(err => {
+  console.error("[startup] Fatal error during boot:", err);
+  process.exit(1);
+});
 
 // --------------------------------------------------
 // MFLAGS_D Watcher
@@ -1092,29 +1164,27 @@ function startMflagsDWatcher() {
     }
 
     mflagsWatcher = fs.watch(MFLAGS_D_PATH, async (eventType) => {
-      if (eventType === "change") {
-        const newSuffix = await readDateSuffix();
-        if (newSuffix && newSuffix !== currentDateSuffix) {
-          console.log(`[MFLAGS_D] Date changed: ${currentDateSuffix} → ${newSuffix}`);
-          currentDateSuffix = newSuffix;
-
-          // Notify all date-suffixed watchers to roll over.
-          for (const config of FILE_CONFIG) {
-            if (config.usesDateSuffix) {
-              await watchers[config.name].rolloverTo(newSuffix);
-            }
+      // The whole callback is guarded: an error during midnight rollover must
+      // never become an unhandled rejection that kills the 24/7 process.
+      try {
+        if (eventType === "change") {
+          const newSuffix = await readDateSuffix();
+          if (newSuffix && newSuffix !== currentDateSuffix) {
+            console.log(`[MFLAGS_D] Date changed: ${currentDateSuffix} → ${newSuffix}`);
+            currentDateSuffix = newSuffix;
+            await rolloverAllDateSuffixed(newSuffix);
+            sendUnifiedRaw("MFLAGS_D", JSON.stringify({ type: "dateRollover", dateSuffix: newSuffix }));
           }
-
-          // Broadcast a global rollover event on the unified channel.
-          sendUnifiedRaw("MFLAGS_D", JSON.stringify({ type: "dateRollover", dateSuffix: newSuffix }));
+        } else if (eventType === "rename") {
+          console.warn("[MFLAGS_D] Flag file removed. Polling for it…");
+          if (mflagsWatcher) {
+            try { mflagsWatcher.close(); } catch { /* ignore */ }
+            mflagsWatcher = null;
+          }
+          pollForMflags();
         }
-      } else if (eventType === "rename") {
-        console.warn("[MFLAGS_D] Flag file removed. Polling for it…");
-        if (mflagsWatcher) {
-          try { mflagsWatcher.close(); } catch { /* ignore */ }
-          mflagsWatcher = null;
-        }
-        pollForMflags();
+      } catch (err) {
+        console.error(`[MFLAGS_D] Error handling ${eventType}: ${err.message}`);
       }
     });
 
@@ -1132,8 +1202,15 @@ function startMflagsDWatcher() {
 
   function pollForMflags() {
     if (mflagsResurrectTimer) return;
+    let ticking = false;   // in-flight guard: a slow stat must not stack ticks
     mflagsResurrectTimer = setInterval(async () => {
-      if (fs.existsSync(MFLAGS_D_PATH)) {
+      if (ticking) return;
+      ticking = true;
+      try {
+        // fsp.access is async — existsSync on a slow/network share blocks the
+        // whole event loop for every poll tick.
+        const exists = await fsp.access(MFLAGS_D_PATH).then(() => true, () => false);
+        if (!exists) return;
         clearInterval(mflagsResurrectTimer);
         mflagsResurrectTimer = null;
         console.log("[MFLAGS_D] Flag file reappeared. Reattaching watcher.");
@@ -1141,19 +1218,33 @@ function startMflagsDWatcher() {
         const newSuffix = await readDateSuffix();
         if (newSuffix && newSuffix !== currentDateSuffix) {
           currentDateSuffix = newSuffix;
-          for (const config of FILE_CONFIG) {
-            if (config.usesDateSuffix) {
-              await watchers[config.name].rolloverTo(newSuffix);
-            }
-          }
+          await rolloverAllDateSuffixed(newSuffix);
           sendUnifiedRaw("MFLAGS_D", JSON.stringify({ type: "dateRollover", dateSuffix: newSuffix }));
         }
         attachMflagsWatch();
+      } catch (err) {
+        console.error(`[MFLAGS_D] Poll error: ${err.message}`);
+      } finally {
+        ticking = false;
       }
     }, RESURRECTION_POLL_MS);
   }
 
   attachMflagsWatch();
+}
+
+// Roll every date-suffixed watcher over to the new date. Each watcher is
+// isolated: one failure must not abort the loop or crash the process at
+// midnight.
+async function rolloverAllDateSuffixed(newSuffix) {
+  for (const config of FILE_CONFIG) {
+    if (!config.usesDateSuffix) continue;
+    try {
+      await watchers[config.name].rolloverTo(newSuffix);
+    } catch (err) {
+      console.error(`[${config.name}] Rollover to ${newSuffix} failed: ${err.message}`);
+    }
+  }
 }
 
 // --------------------------------------------------
@@ -1173,18 +1264,21 @@ app.get("/events/:source", (req, res) => {
   res.setHeader("Connection", "keep-alive");
 
   res.flushHeaders?.();
-  watcher.addClient(res);
-
-  res.write(`event: snapshot\ndata: ${JSON.stringify({ type: "snapshot", last_updated_time: watcher.getUpdatedTime(), payload: watcher.getState() })}\n\n`);
 
   const pingInterval = setInterval(() => {
-    res.write(": ping\n\n");
+    writeToClient(res, ": ping\n\n");
   }, 15000);
 
+  // Registered BEFORE any write / addClient: previously this route threw on a
+  // typo'd method AFTER adding the client, leaving a zombie res in the
+  // watcher's client Set forever.
   req.on("close", () => {
     clearInterval(pingInterval);
     watcher.removeClient(res);
   });
+
+  watcher.addClient(res);
+  writeToClient(res, `event: snapshot\ndata: ${JSON.stringify({ type: "snapshot", last_updated_time: watcher.getLastUpdatedTime(), payload: watcher.getState() })}\n\n`);
 });
 
 // --------------------------------------------------
@@ -1301,14 +1395,14 @@ app.post("/api/jobs", async (req, res) => {
 app.post('/api/neft-invalid', async (req, res) => {
   try {
     const { date, isDay } = req.body;
-    
-    if (!date) {
-      return res.status(400).json({ error: 'Date is required' });
+
+    // Date is interpolated into a file path — accept strictly YYYYMMDD to
+    // block path traversal (e.g. "../../etc/passwd").
+    if (!date || typeof date !== 'string' || !/^\d{8}$/.test(date)) {
+      return res.status(400).json({ error: 'Date is required in YYYYMMDD format' });
     }
 
-    console.log(isDay ? "day" : "night");
-    
-    const filePath = isDay 
+    const filePath = isDay
       ? `data/Neft_Invalid.txt.${date}`
       : `data/Neft_InvalidNight.txt.${date}`;
     
@@ -1334,7 +1428,13 @@ app.post('/api/neft-invalid', async (req, res) => {
 app.post('/api/pace_buildup', async (req, res) => {
   try {
     const { flag } = req.body;
-    
+
+    // `flag` becomes a filename — restrict to a safe charset (no slashes,
+    // no "..") to block path traversal.
+    if (!flag || typeof flag !== 'string' || !/^[A-Za-z0-9._-]+$/.test(flag) || flag.includes('..')) {
+      return res.status(400).json({ error: 'Invalid flag' });
+    }
+
     const resultState = await readPaceBuildup(`data/${flag}`);
 
     res.json({
