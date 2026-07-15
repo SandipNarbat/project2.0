@@ -1,0 +1,37 @@
+Subject: DNS Request – Shared Hostname for SmartPortal Dashboard Servers
+
+Hi Team,
+
+Requesting a new DNS host record to serve as a single, switchable entry point for our SmartPortal dashboard servers.
+
+Background:
+We run 3 regions (NR, DR, PR), each with 16 application servers, but only one region is active at a time. We also have 3 SmartPortal dashboard servers in an active/standby setup – one is live, and we fail over to another if issues arise.
+
+Rather than hardcoding a destination IP on all 48 application servers, we want them to point to a single DNS hostname. That way, when we need to fail over to a standby dashboard server, we simply update the DNS record instead of reconfiguring every application server.
+
+Request:
+- Create hostname: smartportal.[yourdomain] (A record) – please advise if there's a naming convention we should follow
+- Initial target IP (current active/primary SmartPortal server): 10.177.194.138
+- Standby IPs, for future reference only (no record needed now): 10.177.177.228, 10.190.210.116
+- TTL: please set a low TTL (e.g., 60–300 seconds) so failover changes propagate quickly
+
+Could you confirm once this is created, and let us know the process to follow on our end when we need to repoint the record to a standby server?
+
+Thanks,
+[Your Name]
+
+
+Subject: DNS Request – SmartPortal Hostname
+
+Hi Team,
+
+Please create the following DNS record:
+
+- Hostname: smartportal.[yourdomain] (A record)
+- Target IP: 10.177.194.138
+- TTL: 60–300 seconds
+
+Please confirm once done.
+
+Thanks,
+[Your Name]
