@@ -1,0 +1,223 @@
+/* Container Layout */
+.repost-fail-container {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 20px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: #333;
+  
+}
+
+/* Card Styles */
+.repostcard {
+  background: #ffffff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  overflow: hidden;
+  padding-top: 56px;
+}
+
+/* Header Section */
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #e0e0e0;
+  background-color: #f9fafb;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.card-title h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2937;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Search Input */
+.searchTable {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.searchTable label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #6b7280;
+}
+
+.searchTable input {
+  padding: 6px 12px;
+  font-size: 13px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.searchTable input:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+}
+
+.header-meta {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7280;
+}
+
+/* Table Styles */
+.legend-table-wrapper {
+  overflow-x: auto;
+  max-height: 600px; /* Optional: Add scroll if table is too long */
+  overflow-y: auto;
+}
+
+.legend-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  text-align: left;
+}
+
+.legend-table thead {
+  position: sticky;
+  top: 0;
+  background-color: #f3f4f6;
+  z-index: 10;
+}
+
+.legend-table th {
+  padding: 12px 16px;
+  font-weight: 600;
+  color: #374151;
+  border-bottom: 2px solid #e5e7eb;
+  white-space: nowrap;
+}
+
+/* Sorting Styles */
+.sortable {
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.2s;
+}
+
+
+.icon-up{
+  transform: rotate(45deg);
+}
+.sortable:hover {
+  background-color: #e5e7eb;
+}
+
+.sort-icon {
+  display: inline-block;
+  margin-left: 6px;
+  width: 12px;
+  height: 12px;
+  vertical-align: middle;
+  fill: #9ca3af;
+}
+
+.sortable:hover .sort-icon {
+  fill: #4b5563;
+}
+
+.legend-table tbody tr {
+  border-bottom: 1px solid #f3f4f6;
+  transition: background-color 0.2s;
+}
+
+.legend-table tbody tr:hover {
+  background-color: #f9fafb;
+}
+
+.legend-table td {
+  padding: 10px 16px;
+  color: #4b5563;
+  vertical-align: middle;
+}
+
+/* Highlight Animation */
+.highlight-row {
+  animation: highlightFade 0.8s ease-out;
+}
+
+@keyframes highlightFade {
+  0% { background-color: #fef3c7; }
+  100% { background-color: transparent; }
+}
+
+/* Empty State */
+.empty-message {
+  text-align: center;
+  padding: 40px 20px;
+  color: #9ca3af;
+  font-style: italic;
+}
+
+/* Scroll to Top Button */
+.scroll-to-top-container {
+  position: relative;
+  height: 20px; /* Space holder if needed, or use fixed positioning */
+  margin-top: 10px;
+  text-align: right;
+  padding-right: 20px;
+}
+
+.scroll-to-top {
+  position: fixed;
+  bottom: 30px;
+  right: 30px;
+  background-color: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  transition: background-color 0.2s, transform 0.2s;
+  z-index: 100;
+}
+
+.scroll-to-top:hover {
+  background-color: #2563eb;
+  transform: translateY(-2px);
+}
+
+.scroll-to-top svg {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
+}
+
+/* Responsive Adjustments */
+@media (max-width: 768px) {
+  .card-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  
+  .searchTable {
+    width: 100%;
+  }
+  
+  .searchTable input {
+    width: 100%;
+    box-sizing: border-box;
+  }
+}   
