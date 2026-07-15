@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { IconCheck, IconDown, IconUp } from "../components/Icons";
 // import './RepostFail.css';
+const PAGE_SIZE = 20; // same as BranchLoggedIn
 const QueueAnimatedCell = React.memo(function QueueAnimatedCell({ value }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
@@ -24,6 +25,7 @@ export default function RepostFail({ data = {}, lastUpdated }) {
   const [search, setSearch] = useState("");
   const [sortConfig, setSortConfig] = useState({ key: null, direction: 'ascending' });
   const [isVisible, setIsVisible] = useState(false);
+  const [page, setPage] = useState(1);
   // Filter Data
   const filterData = useMemo(() => {
     return queueKeys.filter((key) => {
@@ -65,12 +67,26 @@ export default function RepostFail({ data = {}, lastUpdated }) {
     }
     return sortableKeys;
   }, [search, filterData, queueKeys, sortConfig, sourceData]);
+  // Pagination — 20 rows per page, same as BranchLoggedIn
+  const total = sortedKeys.length;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+  const pageKeys = sortedKeys.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const firstShown = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+  const lastShown = Math.min(page * PAGE_SIZE, total);
   const requestSort = (key) => {
-    let direction = 'ascending';
-    if (sortConfig.key === key && sortConfig.direction === 'ascending') {
-      direction = 'descending';
-    }
-    setSortConfig({ key, direction });
+    // Use the functional updater so the toggle always reads the LATEST
+    // committed sortConfig. Reading sortConfig from the render closure meant a
+    // click landing during one of this component's frequent SSE re-renders
+    // could compute the direction from a stale value, so the sort appeared to
+    // need a second click.
+    setSortConfig((prev) => ({
+      key,
+      direction: prev.key === key && prev.direction === 'ascending' ? 'descending' : 'ascending',
+    }));
+    setPage(1);
   };
   const getSortIcon = (columnName) => {
     if (sortConfig.key !== columnName) {
@@ -124,7 +140,7 @@ export default function RepostFail({ data = {}, lastUpdated }) {
             <input
               type="text"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
               placeholder="Filter table..."
             />
           </div>
@@ -145,9 +161,23 @@ export default function RepostFail({ data = {}, lastUpdated }) {
               </tr>
             </thead>
             <tbody id="my-table">
-              {renderRows(sortedKeys)}
+              {renderRows(pageKeys)}
             </tbody>
           </table>
+        </div>
+        {/* Pagination — same markup/classes as BranchLoggedIn so it inherits
+            the identical styling from the globally-bundled BranchLoggedIn.css */}
+        <div className="pagination">
+          <span>
+            {total === 0 ? "No entries" : `Showing ${firstShown} – ${lastShown} of ${total}`}
+          </span>
+          <div className="page-button" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <button onClick={() => setPage(1)} disabled={page <= 1}>First</button>
+            <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>Prev</button>
+            <span>Page {page} of {totalPages}</span>
+            <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages}>Next</button>
+            <button onClick={() => setPage(totalPages)} disabled={page >= totalPages}>Last</button>
+          </div>
         </div>
         <div className="scroll-to-top-container">
           {isVisible && (
