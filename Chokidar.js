@@ -21,6 +21,17 @@ let watcher;
 const pendingChanges = new Map();
 let GROUP_RULES = [];
 
+// --- MQ status merge config (used by the group rule below AND mqStatusMerge) ---
+// Three status groups (RTGS / NEFT / IMPS), 16 files each, all merged into the
+// SINGLE output file mq_status_16apps.txt. These files are NOT date-suffixed.
+const MQ_STATUS_SUFFIXES = ['i', 'I', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'j', 'k', 'm', 'n', 'p', 'q'];
+const MQ_STATUS_GROUPS = [
+    MQ_STATUS_SUFFIXES.map(s => `mq_rtgs_status_${s}.txt`),
+    MQ_STATUS_SUFFIXES.map(s => `mq_neft_status_${s}.txt`),
+    MQ_STATUS_SUFFIXES.map(s => `mq_imps_status_${s}.txt`),
+];
+const MQ_STATUS_OUTPUT = 'mq_status_16apps.txt';
+
 // Helper: Initialize Group Rules
 function initializeGroupRules(date) {
     return [
@@ -28,6 +39,13 @@ function initializeGroupRules(date) {
             fileNames: [`tf_pen_pro_i.txt_${date}`, `tf_pen_pro_I.txt_${date}`, `tf_pen_pro_a.txt_${date}`, `tf_pen_pro_b.txt_${date}`, `tf_pen_pro_c.txt_${date}`, `tf_pen_pro_d.txt_${date}`, `tf_pen_pro_e.txt_${date}`, `tf_pen_pro_f.txt_${date}`, `tf_pen_pro_g.txt_${date}`, `tf_pen_pro_h.txt_${date}`, `tf_pen_pro_j.txt_${date}`, `tf_pen_pro_k.txt_${date}`, `tf_pen_pro_m.txt_${date}`, `tf_pen_pro_n.txt_${date}`, `tf_pen_pro_p.txt_${date}`, `tf_pen_pro_q.txt_${date}`],
             output: `TRICKLEFEED_MASTER.txt_${date}`,
             function : "trickleMerge"
+        },
+        {
+            // Any of the 48 MQ status files changing re-runs mqStatusMerge,
+            // which re-reads all three groups and rewrites the single output.
+            fileNames: MQ_STATUS_GROUPS.flat(),
+            output: MQ_STATUS_OUTPUT,
+            function: "mqStatusMerge"
         }
     ];
 }
@@ -240,23 +258,15 @@ async function init() {
 //     looks the name up here.
 const MERGE_FUNCTIONS = {
     trickleMerge,
+    mqStatusMerge,
 };
 
-// (2) MQ status merge — three status groups (RTGS / NEFT / IMPS), 16 files each.
-//     Node.js equivalent of the reference shell:
+// (2) MQ status merge — three status groups (RTGS / NEFT / IMPS), 16 files each,
+//     merged into the single file mq_status_16apps.txt. Node.js equivalent of:
 //         paste -d ',' mq_rtgs_status_* >  mq_status_16apps.txt
 //         paste -d ',' mq_neft_status_* >> mq_status_16apps.txt
 //         paste -d ',' mq_imps_status_* >> mq_status_16apps.txt
-//     Each group is pasted horizontally (output line i = line i of every file
-//     in the group joined by commas); the three groups are then stacked into
-//     ONE output file.
-const MQ_STATUS_SUFFIXES = ['i', 'I', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'j', 'k', 'm', 'n', 'p', 'q'];
-const MQ_STATUS_GROUPS = [
-    MQ_STATUS_SUFFIXES.map(s => `mq_rtgs_status_${s}.txt`),
-    MQ_STATUS_SUFFIXES.map(s => `mq_neft_status_${s}.txt`),
-    MQ_STATUS_SUFFIXES.map(s => `mq_imps_status_${s}.txt`),
-];
-const MQ_STATUS_OUTPUT = 'mq_status_16apps.txt';
+//     (config — MQ_STATUS_GROUPS / MQ_STATUS_OUTPUT — is defined near the top).
 
 // `paste -d ','` for one group: returns an array of output lines where line i
 // is line i of every (existing) input file joined by commas. A file that has
@@ -283,26 +293,29 @@ async function pasteFilesHorizontally(fileList) {
     return lines;
 }
 
-// Merge all three MQ status groups into the single output file.
-async function mqStatusMerge() {
+// Merge all three MQ status groups into the single output file. Called by the
+// watcher pipeline via performGroupMerge, so it takes the (fileList, outputFile)
+// dispatch signature: fileList is ignored because this merge always re-reads
+// all three groups; outputFile defaults to MQ_STATUS_OUTPUT.
+async function mqStatusMerge(_fileList, outputFile = MQ_STATUS_OUTPUT) {
     const groupLineSets = [];
     for (const group of MQ_STATUS_GROUPS) {
         groupLineSets.push(await pasteFilesHorizontally(group));
     }
 
     if (groupLineSets.every(lines => lines.length === 0)) {
-        console.log(`No input files found for ${MQ_STATUS_OUTPUT}.`);
+        console.log(`No input files found for ${outputFile}.`);
         return;
     }
 
-    const output = fs.createWriteStream(path.join(WATCH_DIR, MQ_STATUS_OUTPUT));
+    const output = fs.createWriteStream(path.join(WATCH_DIR, outputFile));
     try {
         for (const lines of groupLineSets) {          // stack the groups vertically
             for (const line of lines) output.write(line + '\n');
         }
         output.end();
         await finishedPromise(output);
-        console.log(`[${new Date().toLocaleTimeString()}] Merged 3 MQ status groups into ${MQ_STATUS_OUTPUT}`);
+        console.log(`[${new Date().toLocaleTimeString()}] Merged 3 MQ status groups into ${outputFile}`);
     } catch (err) {
         console.error('MQ status merge error:', err);
         output.destroy(err);
@@ -310,7 +323,6 @@ async function mqStatusMerge() {
     }
 }
 
-// Run the MQ status merge once at startup. To re-merge automatically whenever
-// these files change, add MQ_STATUS_GROUPS to a group rule (with a matching
-// entry in MERGE_FUNCTIONS) and let the existing watcher pipeline trigger it.
-mqStatusMerge().catch(console.error);
+// mqStatusMerge is registered in MERGE_FUNCTIONS and wired to the MQ group rule
+// in initializeGroupRules, so the watcher runs it at startup and again whenever
+// any of the MQ status files change (no separate one-shot call needed).
