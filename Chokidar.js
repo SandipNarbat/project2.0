@@ -113,7 +113,11 @@ async function trickleMerge(fileList, outputFile) {
 
 async function performGroupMerge(outputFile, inputFiles) {
     if (inputFiles.size === 0) return;
-    await trickleMerge(Array.from(inputFiles), outputFile);
+    // Dispatch to the merge function named in the group's `function` config
+    // (see initializeGroupRules). Falls back to trickleMerge if unset/unknown.
+    const rule = GROUP_RULES.find(r => r.output === outputFile);
+    const mergeFn = (rule && MERGE_FUNCTIONS[rule.function]) || trickleMerge;
+    await mergeFn(Array.from(inputFiles), outputFile);
 }
 
 async function processQueue() {
@@ -224,3 +228,89 @@ async function init() {
 // output file name:  mq_status_16apps.txt
 
 //create a separate function for this perticular three groups ( note all three groups are going to merge in a single file not seaprate for each group)
+
+
+// ===========================================================================
+// TASK IMPLEMENTATION
+// ===========================================================================
+
+// (1) Merge-function registry — makes the `function` field on a group rule
+//     (see initializeGroupRules) actually choose which merge runs, so
+//     different groups can use different merge functions. `performGroupMerge`
+//     looks the name up here.
+const MERGE_FUNCTIONS = {
+    trickleMerge,
+};
+
+// (2) MQ status merge — three status groups (RTGS / NEFT / IMPS), 16 files each.
+//     Node.js equivalent of the reference shell:
+//         paste -d ',' mq_rtgs_status_* >  mq_status_16apps.txt
+//         paste -d ',' mq_neft_status_* >> mq_status_16apps.txt
+//         paste -d ',' mq_imps_status_* >> mq_status_16apps.txt
+//     Each group is pasted horizontally (output line i = line i of every file
+//     in the group joined by commas); the three groups are then stacked into
+//     ONE output file.
+const MQ_STATUS_SUFFIXES = ['i', 'I', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'j', 'k', 'm', 'n', 'p', 'q'];
+const MQ_STATUS_GROUPS = [
+    MQ_STATUS_SUFFIXES.map(s => `mq_rtgs_status_${s}.txt`),
+    MQ_STATUS_SUFFIXES.map(s => `mq_neft_status_${s}.txt`),
+    MQ_STATUS_SUFFIXES.map(s => `mq_imps_status_${s}.txt`),
+];
+const MQ_STATUS_OUTPUT = 'mq_status_16apps.txt';
+
+// `paste -d ','` for one group: returns an array of output lines where line i
+// is line i of every (existing) input file joined by commas. A file that has
+// run out of lines contributes an empty field, matching paste's behaviour.
+async function pasteFilesHorizontally(fileList) {
+    const validFiles = fileList
+        .map(f => path.join(WATCH_DIR, f))
+        .filter(f => fs.existsSync(f));
+
+    if (validFiles.length === 0) return [];
+
+    const readers = validFiles.map(file => {
+        const stream = fs.createReadStream(file);
+        const rl = require('readline').createInterface({ input: stream, crlfDelay: Infinity });
+        return rl[Symbol.asyncIterator]();
+    });
+
+    const lines = [];
+    while (true) {
+        const results = await Promise.all(readers.map(iter => iter.next()));
+        if (results.every(res => res.done)) break;
+        lines.push(results.map(res => (res.done ? '' : res.value.trim())).join(','));
+    }
+    return lines;
+}
+
+// Merge all three MQ status groups into the single output file.
+async function mqStatusMerge() {
+    const groupLineSets = [];
+    for (const group of MQ_STATUS_GROUPS) {
+        groupLineSets.push(await pasteFilesHorizontally(group));
+    }
+
+    if (groupLineSets.every(lines => lines.length === 0)) {
+        console.log(`No input files found for ${MQ_STATUS_OUTPUT}.`);
+        return;
+    }
+
+    const output = fs.createWriteStream(path.join(WATCH_DIR, MQ_STATUS_OUTPUT));
+    try {
+        for (const lines of groupLineSets) {          // stack the groups vertically
+            for (const line of lines) output.write(line + '\n');
+        }
+        output.end();
+        await finishedPromise(output);
+        console.log(`[${new Date().toLocaleTimeString()}] Merged 3 MQ status groups into ${MQ_STATUS_OUTPUT}`);
+    } catch (err) {
+        console.error('MQ status merge error:', err);
+        output.destroy(err);
+        throw err;
+    }
+}
+
+// Run the MQ status merge once at startup. To re-merge automatically whenever
+// these files change, add MQ_STATUS_GROUPS to a group rule (with a matching
+// entry in MERGE_FUNCTIONS) and let the existing watcher pipeline trigger it.
+mqStatusMerge().catch(console.error);
