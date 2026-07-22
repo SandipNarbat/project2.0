@@ -10,6 +10,9 @@ function getPillClass(val) {
   if (val <= 499) return "pill pill-orange";
   return "pill pill-red";
 }
+// These queues are always pinned to the bottom of the table, in this order,
+// regardless of their values or the hot-row sort. (matched case-insensitively)
+const BOTTOM_KEYS = ["CTAQ", "VV1Q", "VV2Q", "ACRQ"];
 const QueueAnimatedCell = React.memo(function QueueAnimatedCell({ value }) {
   const [highlight, setHighlight] = useState(false);
   const prev = useRef(value);
@@ -43,7 +46,10 @@ function QueueMetrics({ data, lastUpdated }) {
       if (!Array.isArray(row)) return -Infinity;
       return row.reduce((m, v) => (typeof v === "number" && v > m ? v : m), -Infinity);
     };
-    return [...queueKeys].sort((a, b) => {
+    // Split off the pinned-bottom keys so they never take part in the top sort.
+    const isBottom = (key) => BOTTOM_KEYS.includes(key.toUpperCase());
+    const normal = queueKeys.filter((k) => !isBottom(k));
+    normal.sort((a, b) => {
       const aHot = rowMax(a) >= THRESHOLD;
       const bHot = rowMax(b) >= THRESHOLD;
       if (aHot && bHot) return rowMax(b) - rowMax(a);
@@ -51,6 +57,12 @@ function QueueMetrics({ data, lastUpdated }) {
       if (bHot) return 1;
       return 0;
     });
+    // Append the pinned keys at the bottom, in BOTTOM_KEYS order, keeping only
+    // the ones actually present in the data (matched case-insensitively).
+    const bottom = BOTTOM_KEYS
+      .map((bk) => queueKeys.find((k) => k.toUpperCase() === bk))
+      .filter(Boolean);
+    return [...normal, ...bottom];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
   const [showPopup, setShowPopup] = useState(false);
