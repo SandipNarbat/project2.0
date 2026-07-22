@@ -38,6 +38,11 @@ export default function TopNavBar({ branchCount = "0", tellerCount = "0", repost
   const [marketDate, setMarketDate] = React.useState(new Date());
   const navigate = useNavigate();
   const location = useLocation();
+  // Night context = the Night dashboard and its EOD/SOD sub-page. In this
+  // context only the common tabs (Legends + EOD/SOD, plus the Dashboard /
+  // Night Region nav) are shown; the day-region options are hidden here and
+  // reappear on the Dashboard.
+  const isNightActive = location.pathname === '/night' || location.pathname === '/eodsod';
   const formattedMarketDate = formatDateToYYYYMMDD(marketDate)
   const [dateWiseData, setDateWiseData] = useState({})
   const [theme, setTheme] = useState(() => {
@@ -75,19 +80,19 @@ export default function TopNavBar({ branchCount = "0", tellerCount = "0", repost
           <div className={`tab ${location.pathname === '/night' ? 'active' : ''}`} onClick={() => navigate('/night', { state: { isNightActive: true } })} style={{ cursor: 'pointer' }}>Night Region</div>
           {/* <div className="tab">We Are in PR</div>
           <div className="tab">Enquiry In DR</div> */}
-          {location.pathname !== '/night' && (<div className={`tab ${location.pathname === '/cbs-flow' ? 'active' : ''}`} onClick={() => navigate('/cbs-flow')} style={{ cursor: 'pointer' }}>CBS Flow</div>)}
+          {!isNightActive && (<div className={`tab ${location.pathname === '/cbs-flow' ? 'active' : ''}`} onClick={() => navigate('/cbs-flow')} style={{ cursor: 'pointer' }}>CBS Flow</div>)}
 
           <div className={`tab ${location.pathname === '/legend' ? 'active' : ''}`} onClick={() => navigate('/legend')} style={{ cursor: 'pointer' }}>Legends</div>
-          {location.pathname !== '/' && (<div className={`tab ${location.pathname === '/eodsod' ? 'active' : ''}`} onClick={() => navigate('/eodsod', { state: { isNightActive: true } })} style={{ cursor: 'pointer' }}>EOD/SOD</div>)}
-          {location.pathname !== '/night' && (<div className={`tab ${location.pathname === '/txn-desc' ? 'active' : ''}`} onClick={() => navigate('/txn-desc')} style={{ cursor: 'pointer' }}>TXN DESC</div>)}
-          {location.pathname !== '/night' && (<div className={`tab ${location.pathname === '/neft-invalid' ? 'active' : ''}`} onClick={() => navigate('/neft-invalid')} style={{ cursor: 'pointer' }}><span className="text-red">NEFT Invalid (D/N): <strong>{neftInvalidDay}/{neftInvalidNight}</strong></span>
+          {isNightActive && (<div className={`tab ${location.pathname === '/eodsod' ? 'active' : ''}`} onClick={() => navigate('/eodsod', { state: { isNightActive: true } })} style={{ cursor: 'pointer' }}>EOD/SOD</div>)}
+          {!isNightActive && (<div className={`tab ${location.pathname === '/txn-desc' ? 'active' : ''}`} onClick={() => navigate('/txn-desc')} style={{ cursor: 'pointer' }}>TXN DESC</div>)}
+          {!isNightActive && (<div className={`tab ${location.pathname === '/neft-invalid' ? 'active' : ''}`} onClick={() => navigate('/neft-invalid')} style={{ cursor: 'pointer' }}><span className="text-red">NEFT Invalid (D/N): <strong>{neftInvalidDay}/{neftInvalidNight}</strong></span>
           </div>)}
-          {location.pathname !== '/night' && (<div className={`tab ${location.pathname === '/repost-fail' ? 'active' : ''}`} onClick={() => navigate('/repost-fail')} style={{ cursor: 'pointer' }}><span className="text-orange">Repost Fail: <strong>{repostingCount}</strong></span></div>)}
-          {location.pathname !== '/night' && (<div className={`tab ${location.pathname === '/rtgs-incoming-gateway' ? 'active' : ''}`} onClick={() => navigate('/rtgs-incoming-gateway')} style={{ cursor: 'pointer' }}>RTGS INCOMING GATEWAY</div>)}
+          {!isNightActive && (<div className={`tab ${location.pathname === '/repost-fail' ? 'active' : ''}`} onClick={() => navigate('/repost-fail')} style={{ cursor: 'pointer' }}><span className="text-orange">Repost Fail: <strong>{repostingCount}</strong></span></div>)}
+          {!isNightActive && (<div className={`tab ${location.pathname === '/rtgs-incoming-gateway' ? 'active' : ''}`} onClick={() => navigate('/rtgs-incoming-gateway')} style={{ cursor: 'pointer' }}>RTGS INCOMING GATEWAY</div>)}
         </div>
         <div className="tabs-right">
           <div className="branch-log">
-            {location.pathname !== '/night' && (<div className={`badge dark ${location.pathname === '/branch-logged-in' ? 'active' : ''} teller branch`} onClick={() => navigate('/branch-logged-in')} style={{ cursor: 'pointer' }}>
+            {!isNightActive && (<div className={`badge dark ${location.pathname === '/branch-logged-in' ? 'active' : ''} teller branch`} onClick={() => navigate('/branch-logged-in')} style={{ cursor: 'pointer' }}>
               <div className="circle"><div className="circle2"></div></div>
               <div className="inner-teller">
                 <span className='flag-label'>Branch logged in</span>
@@ -96,7 +101,7 @@ export default function TopNavBar({ branchCount = "0", tellerCount = "0", repost
             </div>)}
           </div>
           <div className="teller-log">
-            {location.pathname !== '/night' && (
+            {!isNightActive && (
               <div className="teller">
                 <div className="circle"><div className="circle2"></div></div>
                 <div className="inner-teller">
@@ -147,16 +152,16 @@ export default function TopNavBar({ branchCount = "0", tellerCount = "0", repost
       {/* Metric Badges / Buttons Rows */}
       {/* <div className="metrics-badges-container"> */}
       {/* <div className="badges-row"> */}
-      {/* {location.pathname !== '/night' && (<div className={`badge dark ${location.pathname === '/branch-logged-in' ? 'active' : ''}`} onClick={() => navigate('/branch-logged-in')} style={{ cursor: 'pointer' }}>Branch logged in: <strong>{branchCount}</strong></div>)} */}
-      {/* {location.pathname !== '/night' && (<div className={`badge dark border-right ${location.pathname === '/teller-logged-in' ? 'active' : ''}`} onClick={() => navigate('/teller-logged-in')} style={{ cursor: 'pointer' }}>Teller logged in: <strong>{tellerCount}</strong></div>)} */}
-      {/* {location.pathname !== '/night' && (<div className={`badge light ${location.pathname === '/txn-desc' ? 'active' : ''}`} onClick={() => navigate('/txn-desc')} style={{ cursor: 'pointer' }}>TXN DESC</div>)} */}
-      {/* {location.pathname !== '/night' && (<div className={`badge light ${location.pathname === '/all-files' ? 'active' : ''}`} onClick={() => navigate('/all-files')} style={{ cursor: 'pointer' }}>ALL FILES</div>)} */}
-      {/* {location.pathname !== '/night' && (<div className={`badge light ${location.pathname === '/upi-mr' ? 'active' : ''}`} onClick={() => navigate('/upi-mr')} style={{ cursor: 'pointer' }}>UPI(MR)</div>)} */}
-      {/* {location.pathname !== '/night' && (<div className={`badge light outline-red outline ${location.pathname === '/neft-invalid' ? 'active' : ''}`} onClick={() => navigate('/neft-invalid')} style={{ cursor: 'pointer' }}><span className="text-red">NEFT Invalid (D/N): <strong>{neftInvalidDay}/{neftInvalidNight}</strong></span></div>)} */}
-      {/* {location.pathname !== '/night' && (<div className={`badge light ${location.pathname === '/NEFT' ? 'active' : ''}`} onClick={() => navigate('/NEFT')} style={{ cursor: 'pointer' }}>NEFT INVALID</div>)} */}
+      {/* {!isNightActive && (<div className={`badge dark ${location.pathname === '/branch-logged-in' ? 'active' : ''}`} onClick={() => navigate('/branch-logged-in')} style={{ cursor: 'pointer' }}>Branch logged in: <strong>{branchCount}</strong></div>)} */}
+      {/* {!isNightActive && (<div className={`badge dark border-right ${location.pathname === '/teller-logged-in' ? 'active' : ''}`} onClick={() => navigate('/teller-logged-in')} style={{ cursor: 'pointer' }}>Teller logged in: <strong>{tellerCount}</strong></div>)} */}
+      {/* {!isNightActive && (<div className={`badge light ${location.pathname === '/txn-desc' ? 'active' : ''}`} onClick={() => navigate('/txn-desc')} style={{ cursor: 'pointer' }}>TXN DESC</div>)} */}
+      {/* {!isNightActive && (<div className={`badge light ${location.pathname === '/all-files' ? 'active' : ''}`} onClick={() => navigate('/all-files')} style={{ cursor: 'pointer' }}>ALL FILES</div>)} */}
+      {/* {!isNightActive && (<div className={`badge light ${location.pathname === '/upi-mr' ? 'active' : ''}`} onClick={() => navigate('/upi-mr')} style={{ cursor: 'pointer' }}>UPI(MR)</div>)} */}
+      {/* {!isNightActive && (<div className={`badge light outline-red outline ${location.pathname === '/neft-invalid' ? 'active' : ''}`} onClick={() => navigate('/neft-invalid')} style={{ cursor: 'pointer' }}><span className="text-red">NEFT Invalid (D/N): <strong>{neftInvalidDay}/{neftInvalidNight}</strong></span></div>)} */}
+      {/* {!isNightActive && (<div className={`badge light ${location.pathname === '/NEFT' ? 'active' : ''}`} onClick={() => navigate('/NEFT')} style={{ cursor: 'pointer' }}>NEFT INVALID</div>)} */}
       {/* <div className={`badge light ${location.pathname === '/reposting-status' ? 'active' : ''}`} onClick={() => navigate('/reposting-status')} style={{ cursor: 'pointer' }}>REPOSTING STATUS</div> */}
-      {/* {location.pathname !== '/night' && (<div className={`badge light outline-orange outline ${location.pathname === '/repost-fail' ? 'active' : ''}`} onClick={() => navigate('/repost-fail')} style={{ cursor: 'pointer' }}><span className="text-orange">Repost Fail: <strong>{repostingCount}</strong></span></div>)} */}
-      {/* {location.pathname !== '/night' && (<div className={`badge light ${location.pathname === '/rtgs-incoming-gateway' ? 'active' : ''}`} onClick={() => navigate('/rtgs-incoming-gateway')} style={{ cursor: 'pointer' }}>RTGS INCOMING GATEWAY</div>)} */}
+      {/* {!isNightActive && (<div className={`badge light outline-orange outline ${location.pathname === '/repost-fail' ? 'active' : ''}`} onClick={() => navigate('/repost-fail')} style={{ cursor: 'pointer' }}><span className="text-orange">Repost Fail: <strong>{repostingCount}</strong></span></div>)} */}
+      {/* {!isNightActive && (<div className={`badge light ${location.pathname === '/rtgs-incoming-gateway' ? 'active' : ''}`} onClick={() => navigate('/rtgs-incoming-gateway')} style={{ cursor: 'pointer' }}>RTGS INCOMING GATEWAY</div>)} */}
       {/* <div className={`badge light ${location.pathname === '/rtgs-incoming-ack' ? 'active' : ''}`} onClick={() => navigate('/rtgs-incoming-ack')} style={{ cursor: 'pointer' }}>RTGS INCOMING ACK C54</div> */}
       {/* </div> */}
       {/* </div> */}
