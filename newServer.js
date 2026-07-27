@@ -213,8 +213,38 @@ function createWatcher(name, baseFilePath, readerFn, usesDateSuffix = false, pas
       fsWatcher = null;
     }
 
+    // Auto-detect whether we're watching a single FILE or a FOLDER, so the
+    // same factory handles both. For a folder, fs.watch fires 'change' when a
+    // file inside is modified and 'rename' when a file is added/removed/renamed
+    // — in both cases we just re-read the whole folder, instead of the
+    // file-only behaviour of treating 'rename' as "the path was deleted".
+    let watchingDir = false;
+    try {
+      watchingDir = fs.statSync(activePath).isDirectory();
+    } catch { /* path vanished between checks — treat as a file */ }
+
     try {
       fsWatcher = fs.watch(activePath, (eventType) => {
+        if (watchingDir) {
+          if (debounceTimer) clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(() => {
+            // Only fall back to resurrection polling if the FOLDER itself is gone.
+            if (!fs.existsSync(activePath)) {
+              console.warn(`[${name}] Folder removed: ${activePath}. Polling for resurrection…`);
+              if (fsWatcher) {
+                try { fsWatcher.close(); } catch { /* ignore */ }
+                fsWatcher = null;
+              }
+              broadcast("fileRemoved", { path: activePath });
+              startResurrectionPolling();
+              return;
+            }
+            processFileChange();
+          }, 100);
+          return;
+        }
+
+        // Single-file watch (original behaviour)
         if (eventType === "change") {
           if (debounceTimer) clearTimeout(debounceTimer);
           debounceTimer = setTimeout(processFileChange, 100);
