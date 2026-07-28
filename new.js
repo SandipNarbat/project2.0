@@ -343,3 +343,88 @@ async function init() {
     });
 }
 module.exports = { init };
+
+
+
+const fs = require("fs/promises");
+const path = require("path");
+
+let txnDescCache = null;
+
+/**
+ * Reads all *_txn.txt files in parallel and returns parsed data
+ */
+async function loadTxnDesc(folderPath) {
+    const files = await fs.readdir(folderPath);
+
+    const txnFiles = files.filter(file => /_txn\.txt$/i.test(file));
+
+    const parsedFiles = await Promise.all(
+        txnFiles.map(async (file) => {
+            const filePath = path.join(folderPath, file);
+
+            const content = await fs.readFile(filePath, "utf8");
+
+            const state = {};
+
+            for (const line of content.split("\n")) {
+                const trimmed = line.trim();
+
+                if (!trimmed) continue;
+
+                const parts = trimmed.split("@");
+
+                if (parts.length < 2) continue;
+
+                const key = parts[0].trim();
+
+                state[key] = parts[1].trim();
+            }
+
+            return {
+                name: path.basename(file, ".txt"),
+                state
+            };
+        })
+    );
+
+    txnDescCache = Object.fromEntries(
+        parsedFiles.map(item => [item.name, item.state])
+    );
+
+    console.log(
+        `Loaded ${parsedFiles.length} txn description files into memory`
+    );
+}
+
+/**
+ * Call this ONCE when Express starts
+ */
+(async () => {
+    try {
+        console.time("Initial Txn Load");
+
+        await loadTxnDesc("../portal_data/txt_desc");
+
+        console.timeEnd("Initial Txn Load");
+    } catch (err) {
+        console.error("Failed to preload txn files:", err);
+    }
+})();
+
+/**
+ * API
+ */
+app.get("/api/txn-desc", (req, res) => {
+    try {
+        res.json({
+            message: "Files processed successfully",
+            data: txnDescCache
+        });
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to return cached data",
+            details: err.message
+        });
+    }
+});
