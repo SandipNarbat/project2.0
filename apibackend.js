@@ -7,16 +7,140 @@ const app = express();
 app.use(cors({ origin: ["https://10.177.194.138:9090"] }));
 app.use(express.json());
 
+const ENABLE_API_PROFILING = process.env.API_PERF_LOGS === "1";
+const FILE_CACHE_TTL_MS = Number(process.env.FILE_CACHE_TTL_MS || 30000);
+const fileCache = new Map();
+
+function nowMs() { return Number(process.hrtime.bigint()) / 1e6; }
+
+function createProfile(label) {
+  const startedAt = nowMs();
+  const steps = [];
+  return {
+    async time(name, fn) {
+      const start = nowMs();
+      try {
+        return await fn();
+      } finally {
+        steps.push({ name, ms: +(nowMs() - start).toFixed(2) });
+      }
+    },
+    end(extra = {}) {
+      const totalMs = +(nowMs() - startedAt).toFixed(2);
+      if (ENABLE_API_PROFILING) {
+        const mem = process.memoryUsage();
+        console.log(JSON.stringify({
+          type: "api-profile",
+          label,
+          totalMs,
+          steps,
+          memory: { rss: mem.rss, heapUsed: mem.heapUsed },
+          ...extra,
+        }));
+      }
+      return { totalMs, steps };
+    },
+  };
+}
+
+async function statFile(filePath) {
+  try {
+    return await fsp.stat(filePath);
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+async function readCachedFile(filePath, encoding = "utf8", profile = null) {
+  const read = async () => {
+    const stat = await statFile(filePath);
+    if (!stat) {
+      const err = new Error(`ENOENT: no such file or directory, open '${filePath}'`);
+      err.code = "ENOENT";
+      throw err;
+    }
+    const cached = fileCache.get(filePath);
+    const age = Date.now() - (cached?.checkedAt || 0);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size && age < FILE_CACHE_TTL_MS) {
+      return cached.content;
+    }
+    const content = await fsp.readFile(filePath, encoding);
+    fileCache.set(filePath, { content, mtimeMs: stat.mtimeMs, size: stat.size, checkedAt: Date.now() });
+    return content;
+  };
+  return profile ? profile.time(`readFile:${filePath}`, read) : read();
+}
+
+async function readCachedDir(folderPath, profile = null) {
+  const key = `dir:${folderPath}`;
+  const read = async () => {
+    const stat = await statFile(folderPath);
+    if (!stat) return [];
+    const cached = fileCache.get(key);
+    const age = Date.now() - (cached?.checkedAt || 0);
+    if (cached && cached.mtimeMs === stat.mtimeMs && age < FILE_CACHE_TTL_MS) return cached.files;
+    const files = await fsp.readdir(folderPath);
+    fileCache.set(key, { files, mtimeMs: stat.mtimeMs, checkedAt: Date.now() });
+    return files;
+  };
+  return profile ? profile.time(`readdir:${folderPath}`, read) : read();
+}
+
+async function cachedParsed(cacheKey, dependencies, parser, profile = null) {
+  const stats = await Promise.all(dependencies.map(statFile));
+  const signature = stats.map((stat, idx) => stat ? `${dependencies[idx]}:${stat.mtimeMs}:${stat.size}` : `${dependencies[idx]}:missing`).join("|");
+  const cached = fileCache.get(cacheKey);
+  if (cached?.signature === signature) return cached.value;
+  const value = profile ? await profile.time(`parse:${cacheKey}`, parser) : await parser();
+  fileCache.set(cacheKey, { signature, value, checkedAt: Date.now() });
+  return value;
+}
+
+function sendProfiledJson(res, profile, body) {
+  const jsonBuildStart = nowMs();
+  const json = JSON.stringify(body);
+  const jsonMs = +(nowMs() - jsonBuildStart).toFixed(2);
+  profile.end({ payloadBytes: Buffer.byteLength(json), jsonMs });
+  res.type("application/json").send(json);
+}
+
+
+app.use((req, res, next) => {
+  const startedAt = nowMs();
+  const startUsage = process.cpuUsage();
+  const startMemory = process.memoryUsage();
+  let payloadBytes = 0;
+  const originalSend = res.send.bind(res);
+  res.send = (body) => {
+    if (body !== undefined) {
+      payloadBytes = Buffer.isBuffer(body) ? body.length : Buffer.byteLength(String(body));
+    }
+    return originalSend(body);
+  };
+  res.on("finish", () => {
+    if (!ENABLE_API_PROFILING) return;
+    const cpu = process.cpuUsage(startUsage);
+    const endMemory = process.memoryUsage();
+    console.log(JSON.stringify({
+      type: "api-request",
+      method: req.method,
+      path: req.originalUrl,
+      status: res.statusCode,
+      totalMs: +(nowMs() - startedAt).toFixed(2),
+      payloadBytes,
+      cpuMicros: cpu.user + cpu.system,
+      heapDelta: endMemory.heapUsed - startMemory.heapUsed,
+    }));
+  });
+  next();
+});
 //////////////////////////////////////////[   API'S FUNCTIONS   ]///////////////////////////////////////////
 
 /// Queue Buildup Replica
 async function QueueBuildupReplica(folderPath, queue) {
-  const state = {};
-  let totalCount = 0;
-
-  const files = await fsp.readdir(folderPath);
-
-const txtFiles = files.filter(f => f.startsWith('replica_details_'));
+  const files = await readCachedDir(folderPath);
+  const txtFiles = files.filter(f => f.startsWith('replica_details_'));
   const spacedQueue = queue.includes(" ");
   let regex = null;
   if (spacedQueue) {
@@ -25,140 +149,102 @@ const txtFiles = files.filter(f => f.startsWith('replica_details_'));
   }
   const plainNeedle = queue.slice(0, -1);
 
-  for (const file of txtFiles) {
+  const entries = await Promise.all(txtFiles.map(async (file) => {
     const filePath = path.join(folderPath, file);
-
     const match = file.match(/replica_details_(.*?)_/);
     const identifier = match ? match[1] : file.split('.')[0];
-
     const stateKey = `${identifier}_${queue}`;
-
-    const content = await fsp.readFile(filePath, "utf8");
+    const content = await readCachedFile(filePath, "utf8");
     const replicas = [];
 
-    content.split("\n").forEach(line => {
-      line = line.trim();
-      if (!line) return;
-
+    for (const rawLine of content.split("\n")) {
+      const line = rawLine.trim();
+      if (!line) continue;
       const hit = spacedQueue ? regex.test(line) : line.includes(plainNeedle);
       if (hit) {
-        const parts = line.split(" ");
-        if (parts.length > 0) {
-          replicas.push(parts[0]);
-        }
+        const firstSpace = line.indexOf(" ");
+        replicas.push(firstSpace === -1 ? line : line.slice(0, firstSpace));
       }
+    }
 
-    });
+    return [stateKey, replicas];
+  }));
 
-    state[stateKey] = replicas;
-    totalCount += replicas.length;
-
-  }
-
-  return state;
+  return Object.fromEntries(entries);
 }
 
 // GATEWAY_MORE
 async function readGatewayMore(gatewaypath, date) {
+  const files = await readCachedDir(gatewaypath);
+  const timingPattern = new RegExp(`^timing_b24_.*\\.txt\\.${date}$`, 'i');
+  const timingFiles = files.filter(file => timingPattern.test(file));
 
-  const result = {};
-  const files = await fsp.readdir(gatewaypath);
-
-  const timingFiles = files.filter(file =>
-    new RegExp(`^timing_b24_.*\\.txt\\.${date}$`, 'i').test(file)
-  );
-  console.log("timing fles:")
-  console.log(timingFiles)
-
-  for (const file of timingFiles) {
+  const entries = await Promise.all(timingFiles.map(async (file) => {
     const filePath = path.join(gatewaypath, file);
-    console.log(filePath)
-
-    const content = await fsp.readFile(filePath, "utf8");
+    const content = await readCachedFile(filePath, "utf8");
     const state = {};
 
-    content.split("\n").forEach(line => {
-      line = line.trim();
-      if (!line) return;
+    for (const rawLine of content.split("\n")) {
+      const line = rawLine.trim();
+      if (!line) continue;
       const parts = line.split(" ");
-      const key = parts[0].trim();
-      const metrics = parts.slice(1).map(v => {
-        return v.trim();
-      });
-      state[key] = parts[1]?.trim() ?? "";
-    });
-    const masterName = path.basename(filePath, ".txt");
-    result[masterName] = state;
-  }
-  return result;
+      state[parts[0].trim()] = parts[1]?.trim() ?? "";
+    }
+    return [path.basename(filePath, ".txt"), state];
+  }));
+
+  return Object.fromEntries(entries);
 }
 
 //TRICKLEFEED MORE
 async function readtricklemore(tricklepath, date) {
-  const result = {};
-  const files = await fsp.readdir(tricklepath);
+  const files = await readCachedDir(tricklepath);
+  const timingPattern = new RegExp(`^timing_tric_.*\\.txt\\.${date}$`, 'i');
+  const timingFiles = files.filter(file => timingPattern.test(file));
 
-  const timingFiles = files.filter(file =>
-    new RegExp(`^timing_tric_.*\\.txt\\.${date}$`, 'i').test(file)
-  );
-
-  for (const file of timingFiles) {
+  const entries = await Promise.all(timingFiles.map(async (file) => {
     const filePath = path.join(tricklepath, file);
-
-    const content = await fsp.readFile(filePath, "utf8");
+    const content = await readCachedFile(filePath, "utf8");
     const state = {};
 
-    content.split("\n").forEach(line => {
-      line = line.trim();
-      if (!line) return;
+    for (const rawLine of content.split("\n")) {
+      const line = rawLine.trim();
+      if (!line) continue;
       const parts = line.split(" ");
-      const key = parts[0].trim();
-      const metrics = parts.slice(1).map(v => {
-        return v.trim();
-      });
-      state[key] = metrics;
-    });
-    const masterName = path.basename(filePath, ".txt");
-    result[masterName] = state;
-  }
-  // console.log({[masterName]:state})
-  return result;
+      state[parts[0].trim()] = parts.slice(1).map(v => v.trim());
+    }
+    return [path.basename(filePath, ".txt"), state];
+  }));
+
+  return Object.fromEntries(entries);
 }
 
 //RTGS MORE
 async function readrtgsmore(rtgspath, date) {
-  const result = {};
-  const files = await fsp.readdir(rtgspath);
+  const files = await readCachedDir(rtgspath);
+  const timingPattern = new RegExp(`^timing_rtgs_.*\\.txt\\.${date}$`, 'i');
+  const timingFiles = files.filter(file => timingPattern.test(file));
 
-  const timingFiles = files.filter(file =>
-    new RegExp(`^timing_rtgs_.*\\.txt\\.${date}$`, 'i').test(file)
-  );
-
-  for (const file of timingFiles) {
+  const entries = await Promise.all(timingFiles.map(async (file) => {
     const filePath = path.join(rtgspath, file);
-
-    const content = await fsp.readFile(filePath, "utf8");
+    const content = await readCachedFile(filePath, "utf8");
     const state = {};
 
-    content.split("\n").forEach(line => {
-      line = line.trim();
-      if (!line) return;
+    for (const rawLine of content.split("\n")) {
+      const line = rawLine.trim();
+      if (!line) continue;
       const parts = line.split(" ");
-      const key = parts[0].trim();
-      const metrics = parts.slice(1).map(v => {
-        return v.trim();
-      });
-      state[key] = metrics;
-    });
-    const masterName = path.basename(filePath, ".txt");
-    result[masterName] = state;
-  }
-  return result;
+      state[parts[0].trim()] = parts.slice(1).map(v => v.trim());
+    }
+    return [path.basename(filePath, ".txt"), state];
+  }));
+
+  return Object.fromEntries(entries);
 }
 
 async function readtrickleSummary(filePath) {
   const state = {};
-  const content = await fsp.readFile(filePath, "utf8");
+  const content = await readCachedFile(filePath, "utf8");
 
   let counter = 1;
 
@@ -180,7 +266,7 @@ async function readtrickleSummary(filePath) {
 
 async function trickleSummaryCount() {
   const filePath = "data/trickle_summ.txt";
-  const content = await fsp.readFile(filePath, 'utf8');
+  const content = await readCachedFile(filePath, "utf8");
 
   const lines = content.trim().split('\n');
   const aggregated = {};
@@ -202,7 +288,7 @@ async function trickleSummaryCount() {
 
 async function NewPlusOld() {
   const filePath = "data/final_trickle.txt";
-  const content = await fsp.readFile(filePath, 'utf8');
+  const content = await readCachedFile(filePath, "utf8");
   const lines = content.trim().split('\r\n');
   const state = {};
 
@@ -218,7 +304,7 @@ async function NewPlusOld() {
 async function NeftInvalidByDate(filePath) {
   const state = {};
   try {
-    const content = await fsp.readFile(filePath, "utf8");
+    const content = await readCachedFile(filePath, "utf8");
     content.split("\n").forEach(line => {
       line = line.trim();
       if (!line) return;
@@ -240,7 +326,7 @@ async function NeftInvalidByDate(filePath) {
 
 async function readPaceBuildup(filePath) {
   const state = {};
-  const content = await fsp.readFile(filePath, "utf8");
+  const content = await readCachedFile(filePath, "utf8");
 
   let counter = 1;
 
@@ -281,9 +367,11 @@ app.post('/api/process-files', async (req, res) => {
 
 app.get('/api/trickle-summ', async (req, res) => {
   try {
-    const summCount = await trickleSummaryCount();
-    const summary = await readtrickleSummary("../portal_data/trickle_summ.txt");
-    const newPlusOld = await NewPlusOld();
+    const [summCount, summary, newPlusOld] = await Promise.all([
+      trickleSummaryCount(),
+      readtrickleSummary("../portal_data/trickle_summ.txt"),
+      NewPlusOld(),
+    ]);
 
 
     res.json({
@@ -386,7 +474,7 @@ app.get("/api/branches", async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
     const search = (req.query.search || "").toString().trim().toLowerCase();
-    const content = await fsp.readFile(DATA_FILE, "utf8");
+    const content = await readCachedFile(DATA_FILE, "utf8");
     let rows = content
       .split("\n")
       .map((l) => l.trim())
@@ -413,31 +501,24 @@ app.get("/api/branches", async (req, res) => {
 
 
 async function readtxnDesc(folderPath) {
-  const result = {};
-  const files = await fsp.readdir(folderPath);
-
+  const files = await readCachedDir(folderPath);
   const txnFiles = files.filter(file => /_txn\.txt$/i.test(file));
-  console.log(txnFiles.length)
-  for (const file of txnFiles) {
-    const filePath = path.join(folderPath, file);
 
-    const content = await fsp.readFile(filePath, "utf8");
+  const entries = await Promise.all(txnFiles.map(async (file) => {
+    const filePath = path.join(folderPath, file);
+    const content = await readCachedFile(filePath, "utf8");
     const state = {};
 
-    content.split("\n").forEach(line => {
-      line = line.trim();
-      if (!line) return;
+    for (const rawLine of content.split("\n")) {
+      const line = rawLine.trim();
+      if (!line) continue;
       const parts = line.split("@");
-      const key = parts[0].trim();
-      const metrics = parts.slice(1).map(v => {
-        return v.trim();
-      });
-      state[key] = parts[1];
-    });
-    const masterName = path.basename(filePath, ".txt");
-    result[masterName] = state;
-  }
-  return result;
+      state[parts[0].trim()] = parts[1];
+    }
+    return [path.basename(filePath, ".txt"), state];
+  }));
+
+  return Object.fromEntries(entries);
 }
 
 app.get('/api/txn-desc', async (req, res) => {
@@ -464,10 +545,10 @@ app.get('/api/check-rc', async (req, res) => {
     console.log(numserver)
     let result = null;
     if (numserver === 0) {
-      const content = await fsp.readFile(`data/app1.core.txt.${date}`, "utf8");
+      const content = await readCachedFile(`data/app1.core.txt.${date}`, "utf8");
       result = content
     } else {
-      const content = await fsp.readFile(`data/app${numserver + 1}.core.txt.${date}`, "utf8");
+      const content = await readCachedFile(`data/app${numserver + 1}.core.txt.${date}`, "utf8");
       result = content
     }
 
@@ -491,7 +572,7 @@ async function nightEodSod(filePath) {
   let currentJobDesc = null;
   let orphanLines = []; // Buffer for lines appearing before a job header
 
-  const content = await fsp.readFile(filePath, "utf8");
+  const content = await readCachedFile(filePath, "utf8");
   const lines = content.split("\n");
 
   for (const line of lines) {
@@ -540,7 +621,7 @@ async function nightEodSod(filePath) {
 async function eodDetails(filePath) {
   const state = {};
 
-  const content = await fsp.readFile(filePath, "utf8");
+  const content = await readCachedFile(filePath, "utf8");
 
   content.split("\n").forEach(line => {
     line = line.trim();
@@ -571,7 +652,7 @@ async function cutOffEodSod(filePath) {
   const state = {};
   let currentJobDesc = null;
   let orphanLines = []; // Buffer for lines appearing before a job header
-  const content = await fsp.readFile(filePath, "utf8");
+  const content = await readCachedFile(filePath, "utf8");
   const lines = content.split("\n");
   for (const line of lines) {
     const trimmedLine = line.trim();
@@ -619,7 +700,7 @@ async function cutOffEodSod(filePath) {
 
 async function addOnDetails(filePath) {
   const state = {};
-  const content = await fsp.readFile(filePath, "utf8");
+  const content = await readCachedFile(filePath, "utf8");
 
   content.split("\n").forEach(line => {
     line = line.trim();
@@ -675,7 +756,7 @@ app.post('/api/night-eodsod', async (req, res) => {
 
 async function repostFail(filePath) {
   const state = {};
-  const content = await fsp.readFile(filePath, "utf8");
+  const content = await readCachedFile(filePath, "utf8");
 
   let counter = 1;
 
@@ -724,4 +805,8 @@ function startApi() {
   });
 }
 
-module.exports = { startApi };
+if (require.main === module) {
+  startApi();
+}
+
+module.exports = { app, startApi };
