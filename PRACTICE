@@ -1,0 +1,96 @@
+async function readGatewayMore(gatewaypath, date) {
+
+  const result = {};
+  const files = await fsp.readdir(gatewaypath);
+
+  const timingFiles = files.filter(file =>
+    new RegExp(`^timing_b24_.*\\.txt\\.${date}$`, 'i').test(file)
+  );
+  console.log("timing fles:")
+  console.log(timingFiles)
+
+  for (const file of timingFiles) {
+    const filePath = path.join(gatewaypath, file);
+    console.log(filePath)
+
+    const content = await fsp.readFile(filePath, "utf8");
+    const state = {};
+
+    content.split("\n").forEach(line => {
+      line = line.trim();
+      if (!line) return;
+      const parts = line.split(" ");
+      const key = parts[0].trim();
+      const metrics = parts.slice(1).map(v => {
+        return v.trim();
+      });
+      state[key] = parts[1]?.trim() ?? "";
+    });
+    const masterName = path.basename(filePath, ".txt");
+    result[masterName] = state;
+  }
+  return result;
+}
+
+//TRICKLEFEED MORE
+async function readtricklemore(tricklepath, date) {
+  const result = {};
+  const files = await fsp.readdir(tricklepath);
+
+  const timingFiles = files.filter(file =>
+    new RegExp(`^timing_tric_.*\\.txt\\.${date}$`, 'i').test(file)
+  );
+
+  for (const file of timingFiles) {
+    const filePath = path.join(tricklepath, file);
+
+    const content = await fsp.readFile(filePath, "utf8");
+    const state = {};
+
+    content.split("\n").forEach(line => {
+      line = line.trim();
+      if (!line) return;
+      const parts = line.split(" ");
+      const key = parts[0].trim();
+      const metrics = parts.slice(1).map(v => {
+        return v.trim();
+      });
+      state[key] = metrics;
+    });
+    const masterName = path.basename(filePath, ".txt");
+    result[masterName] = state;
+  }
+  // console.log({[masterName]:state})
+  return result;
+}
+
+//RTGS MORE
+async function readrtgsmore(rtgspath, date) {
+  const result = {};
+  const files = await fsp.readdir(rtgspath);
+
+  const timingFiles = files.filter(file =>
+    new RegExp(`^timing_rtgs_.*\\.txt\\.${date}$`, 'i').test(file)
+  );
+
+  for (const file of timingFiles) {
+    const filePath = path.join(rtgspath, file);
+
+    const content = await fsp.readFile(filePath, "utf8");
+    const state = {};
+
+    content.split("\n").forEach(line => {
+      line = line.trim();
+      if (!line) return;
+      const parts = line.split(" ");
+      const key = parts[0].trim();
+      const metrics = parts.slice(1).map(v => {
+        return v.trim();
+      });
+      state[key] = metrics;
+    });
+    const masterName = path.basename(filePath, ".txt");
+    result[masterName] = state;
+  }
+  return result;
+}
