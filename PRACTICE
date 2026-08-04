@@ -44,7 +44,13 @@ async function QueueBuildupReplica(fileList, queue) {
     wantedSuffix = null;
   }
 
-  await Promise.all(fileList.map(async (file) => {
+  // Promise.all resolves its returned array in the same order as fileList,
+  // even though the async reads inside finish at different times. So each
+  // task below just RETURNS its result instead of writing into `state`
+  // directly — writing directly from inside the concurrent callbacks is
+  // what caused `state`'s key order to follow read-completion order
+  // instead of fileList order.
+  const results = await Promise.all(fileList.map(async (file) => {
     const filePath = path.join(folderPath, file);
 
     const match = file.match(/replica_details_(.*?)_/);
@@ -67,9 +73,15 @@ async function QueueBuildupReplica(fileList, queue) {
       }
     });
 
+    return { stateKey, replicas };
+  }));
+
+  // Apply results sequentially, in fileList order, so `state`'s key
+  // order (and therefore the JSON output order) matches fileList order.
+  for (const { stateKey, replicas } of results) {
     state[stateKey] = replicas;
     totalCount += replicas.length;
-  }));
+  }
 
   return state;
 }
