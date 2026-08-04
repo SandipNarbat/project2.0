@@ -2,23 +2,47 @@ function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * Parses a data line like:
+ *   "009138 CIF.1.001"       -> { replicaId: "009138", code: "CIF", suffix: null }
+ *   "009856 CIF.1.006.A"     -> { replicaId: "009856", code: "CIF", suffix: "A"  }
+ */
+function parseLine(line) {
+  const parts = line.split(/\s+/);
+  if (parts.length < 2) return null;
+
+  const [replicaId, identifier] = parts;
+  const segments = identifier.split(".");
+  if (segments.length < 3) return null;
+
+  const code = segments[0];
+  // segments = [code, "1", num]           -> no suffix
+  // segments = [code, "1", num, suffix]   -> has suffix
+  const suffix = segments.length > 3 ? segments[3] : null;
+
+  return { replicaId, code, suffix };
+}
+
 /// Queue Buildup Replica
 async function QueueBuildupReplica(fileList, queue) {
   const state = {};
   let totalCount = 0;
-  const folderPath = "../portal_data"
+  const folderPath = "../portal_data";
 
   const spacedQueue = queue.includes(" ");
-  let regex = null;
+  let wantedCode;
+  let wantedSuffix;
 
   if (spacedQueue) {
-    const qparts = queue.split(" ");
-    const first = escapeRegex(qparts[0].slice(0, -1));
-    const second = escapeRegex(qparts[1]);
-    regex = new RegExp(`${first}.......${second}`);
+    // e.g. "CIFQ A" -> wantedCode = "CIF", wantedSuffix = "A"
+    const [codePart, suffixPart] = queue.split(" ");
+    wantedCode = codePart.slice(0, -1);
+    wantedSuffix = suffixPart;
+  } else {
+    // e.g. "CIFQ" -> wantedCode = "CIF", wantedSuffix = null (plain, no suffix)
+    wantedCode = queue.slice(0, -1);
+    wantedSuffix = null;
   }
-
-  const plainNeedle = queue.slice(0, -1);
 
   await Promise.all(fileList.map(async (file) => {
     const filePath = path.join(folderPath, file);
@@ -34,12 +58,12 @@ async function QueueBuildupReplica(fileList, queue) {
       line = line.trim();
       if (!line) return;
 
-      const hit = spacedQueue ? regex.test(line) : line.includes(plainNeedle);
+      const parsed = parseLine(line);
+      if (!parsed) return;
+
+      const hit = parsed.code === wantedCode && parsed.suffix === wantedSuffix;
       if (hit) {
-        const parts = line.split(" ");
-        if (parts.length > 0) {
-          replicas.push(parts[0]);
-        }
+        replicas.push(parsed.replicaId);
       }
     });
 
