@@ -1,87 +1,391 @@
-function escapeRegex(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+import React, { useEffect, useRef, useState } from "react";
+import { Routes, Route } from "react-router-dom";
+import Dashboard from "./Dashboard";
+import NightDashboard from "./NightDashboard"
+import Legend from "./pages/legend";
+import CBSFlow from "./pages/CBSFlow";
+import BranchTellerInterval from "./pages/BranchTellerInterval";
+import MilestoneDetails from "./pages/MilestoneDetails";
+import GatewayHive from "./pages/GatewayHive";
+
+import BranchLoggedIn from "./pages/BranchLoggedIn";
+import TellerLoggedIn from "./pages/TellerLoggedIn";
+import TxnDesc from "./pages/TxnDesc";
+import AllFiles from "./pages/AllFiles";
+import UpiMr from "./pages/UpiMr";
+import NeftInvalid from "./pages/NeftInvalid";
+import RepostingStatus from "./pages/RepostingStatus";
+import RepostFail from "./pages/RepostFail";
+import RtgsIncomingGateway from "./pages/RtgsIncomingGateway";
+// import RtgsIncomingAck from "./pages/RtgsIncomingAck";
+import TopNavBar from "./components/TopNavBar";
+import QueueReplica from "./blocks/QueueReplica";
+
+const SOURCES = [
+  "jobs",
+  "queue",
+  "context",
+  "trickle",
+  "space",
+  "branchLoggedInNo",
+  "tellerLoggedInNo",
+  "branchLoggedIn",
+  "repostingFail",
+  "neftInvalidNight",
+  "neftInvalidDay",
+  "UpiMrMax",
+  "RTGSngingGateway12Apps",
+  "PrLegend",
+  "NrLegend",
+  "DrLegend",
+  "RtgsIncoming",
+  "Mflags_d",
+  "RtgsOutgoing",
+  "rtgsIncomingPend",
+  "rtgsOutgoingPend",
+  "RTGSACKngingGateway12Apps",
+  "system",
+  "MQStatus",
+  "OCRNEFT",
+  "miscTxtCount",
+  "batchUpload",
+  "resourse",
+  "neftRepostFailPage",
+  "neftIncomingCount",
+  "mrHive",
+  "atmHive",
+  "b24Hive",
+  "inbHive",
+  "atmPorts",
+  "replicaMaxCounts",
+
+  //replica count
+  "replica_i",
+  "replica_I",
+  "replica_a",
+  "replica_b",
+  "replica_c",
+  "replica_d",
+  "replica_e",
+  "replica_f",
+  "replica_g",
+  "replica_h",
+  "replica_j",
+  "replica_k",
+  "replica_m",
+  "replica_n",
+  "replica_p",
+  "replica_q",
+
+
+  //night
+  "jobsNight",
+  "queueNight",
+  "in0800",
+  "BR0501",
+  "activeJobM",
+  "activeJobS1"
+];
+const UNIFIED_URL = import.meta.env.VITE_SSE_URL || "http://localhost:8080/events";
+
+const FLUSH_MS = 150;
+const MAX_BUFFER = 2000;
+
+function applyDeltas(sourceState, deltas) {
+  const next = { ...(sourceState || {}) };
+  for (const delta of deltas) {
+    if (delta.type === "new") {
+      next[delta.key] = delta.metrics;
+    } else if (delta.type === "update") {
+      if (Array.isArray(next[delta.key])) {
+        const arr = [...next[delta.key]];
+        delta.changes.forEach((change) => {
+          arr[change.index] = change.new;
+        });
+        next[delta.key] = arr;
+      } else {
+        next[delta.key] = delta.changes[0]?.new;
+      }
+    }
+  }
+  return next;
 }
 
-/**
- * Parses a data line like:
- *   "009138 CIF.1.001"       -> { replicaId: "009138", code: "CIF", suffix: null }
- *   "009856 CIF.1.006.A"     -> { replicaId: "009856", code: "CIF", suffix: "A"  }
- */
-function parseLine(line) {
-  const parts = line.split(/\s+/);
-  if (parts.length < 2) return null;
-
-  const [replicaId, identifier] = parts;
-  const segments = identifier.split(".");
-  if (segments.length < 3) return null;
-
-  const code = segments[0];
-  // segments = [code, "1", num]           -> no suffix
-  // segments = [code, "1", num, suffix]   -> has suffix
-  const suffix = segments.length > 3 ? segments[3] : null;
-
-  return { replicaId, code, suffix };
-}
-
-/// Queue Buildup Replica
-async function QueueBuildupReplica(fileList, queue) {
-  const state = {};
-  let totalCount = 0;
-  const folderPath = "../portal_data";
-
-  const spacedQueue = queue.includes(" ");
-  let wantedCode;
-  let wantedSuffix;
-
-  if (spacedQueue) {
-    // e.g. "CIFQ A" -> wantedCode = "CIF", wantedSuffix = "A"
-    const [codePart, suffixPart] = queue.split(" ");
-    wantedCode = codePart.slice(0, -1);
-    wantedSuffix = suffixPart;
-  } else {
-    // e.g. "CIFQ" -> wantedCode = "CIF", wantedSuffix = null (plain, no suffix)
-    wantedCode = queue.slice(0, -1);
-    wantedSuffix = null;
+const formatDateToYYYYMMDD = (dateInput) => {
+  if (typeof dateInput === 'string' && /^\d{8}$/.test(dateInput)) {
+    return dateInput;
   }
 
-  // Promise.all resolves its returned array in the same order as fileList,
-  // even though the async reads inside finish at different times. So each
-  // task below just RETURNS its result instead of writing into `state`
-  // directly — writing directly from inside the concurrent callbacks is
-  // what caused `state`'s key order to follow read-completion order
-  // instead of fileList order.
-  const results = await Promise.all(fileList.map(async (file) => {
-    const filePath = path.join(folderPath, file);
+  const dateObj = dateInput instanceof Date ? dateInput : new Date(dateInput);
 
-    const match = file.match(/replica_details_(.*?)_/);
-    const identifier = match ? match[1] : file.split('.')[0];
-    const stateKey = `${identifier}_${queue}`;
+  if (isNaN(dateObj.getTime())) {
+    return null;
+  }
 
-    const content = await fsp.readFile(filePath, "utf8");
-    const replicas = [];
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const day = String(dateObj.getDate()).padStart(2, '0');
 
-    content.split("\n").forEach(line => {
-      line = line.trim();
-      if (!line) return;
+  return `${year}${month}${day}`;
+};
 
-      const parsed = parseLine(line);
-      if (!parsed) return;
 
-      const hit = parsed.code === wantedCode && parsed.suffix === wantedSuffix;
-      if (hit) {
-        replicas.push(parsed.replicaId);
-      }
+function App() {
+  const [data, setData] = useState({});
+  const [lastUpdated, setlastUpdated] = useState({});
+  const [status, setStatus] = useState("disconnected");
+  const esRef = useRef(null);
+  const bufRef = useRef([]);
+  const flushTimerRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const retryRef = useRef(0);
+  const [childData, setChildData] = React.useState(formatDateToYYYYMMDD(new Date()));
+  const [dateWiseData, setDateWiseData] = useState({})
+  const [todayDate, setTodayDate] = useState(true)
+
+  // Function to receive data
+  const handleDataFromChild = (data) => {
+    setChildData(data);
+  };
+  /////////////////////////////////////////////////////////////////
+  const [mdata, setMData] = useState(null);
+
+  useEffect(() => {
+    const eventSource = new EventSource('http://localhost:8080/events/Mflags_d');
+
+    eventSource.addEventListener('snapshot', (event) => {
+      const parsedData = JSON.parse(event.data);
+      setMData(parsedData);
     });
 
-    return { stateKey, replicas };
-  }));
+    eventSource.addEventListener('delta', (event) => {
+      const parsedData = JSON.parse(event.data);
+      
+      setMData((prevData) => {
+        if (!prevData || !prevData.payload) return prevData;
 
-  // Apply results sequentially, in fileList order, so `state`'s key
-  // order (and therefore the JSON output order) matches fileList order.
-  for (const { stateKey, replicas } of results) {
-    state[stateKey] = replicas;
-    totalCount += replicas.length;
-  }
+        const updatedPayload = { ...prevData.payload };
 
-  return state;
+        parsedData.payload.forEach((change) => {
+          if (change.type === 'update' && change.key) {
+            const newValue = change.changes?.[0]?.new;
+            if (newValue !== undefined) {
+              updatedPayload[change.key] = newValue;
+            }
+          }
+        });
+
+        return {
+          ...prevData,
+          last_updated_time: parsedData.last_updated_time,
+          payload: updatedPayload
+        };
+      });
+    });
+
+    eventSource.onerror = (err) => console.error('SSE Error:', err);
+
+    return () => eventSource.close();
+  }, []);
+
+  const currentMFlagsDate = mdata?.payload?.MFLAGS_D || "No Date Yet";
+  console.log(currentMFlagsDate)
+
+
+  /////////////////////////////////////////////////////////////////
+
+
+  const isFirstRender = useRef(true);
+
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      setTodayDate(true)
+      return;
+    }
+
+    let cancelled = false;
+    if (childData === currentMFlagsDate) {
+      setTodayDate(true)
+      return;
+    }
+    if (childData === null) {
+      return;
+    }
+    setTodayDate(false)
+    const params = new URLSearchParams({
+      date: String(childData)
+    });
+    console.log("calling date changes")
+    fetch(`http://localhost:8080/api/date_change?${params.toString()}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((json) => {
+        if (!cancelled) setDateWiseData(json);
+      })
+      .catch(() => {
+        if (!cancelled) setDateWiseData(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [childData]);
+
+  useEffect(() => {
+    if (childData === currentMFlagsDate) {
+      return;
+    }
+    if (childData === null) {
+      return;
+    }
+    setData(dateWiseData.sources)
+  }, [dateWiseData])
+
+  useEffect(() => {
+
+    if (childData !== currentMFlagsDate) {
+      return;
+    }
+    let closed = false;
+    console.log("events restarting date is todays date")
+
+    const flush = () => {
+      flushTimerRef.current = null;
+      const events = bufRef.current;
+      bufRef.current = [];
+      if (events.length === 0) return;
+
+      let initSources = null;
+      const perSource = new Map();
+      const stamps = {};
+      for (const { source, raw } of events) {
+        try {
+          const msg = JSON.parse(raw);
+          if (source === "replicaMaxCounts") console.log(`live log detected: ${msg}`);
+          if (source === "__init") {
+            initSources = msg.sources || {};
+            if (msg.replicaMaxCounts) {
+              initSources = {
+                ...initSources, replicaMaxCounts: {
+                  payload: msg.replicaMaxCounts.payload, last_updated_time: msg.replicaMaxCounts.dateSuffix,
+                }
+              }
+            }
+            perSource.clear();
+            for (const [s, v] of Object.entries(initSources)) {
+              if (v?.last_updated_time) stamps[s] = v.last_updated_time;
+            }
+          } else if (msg.type === "snapshot" || msg.type === "delta" || msg.type === "replicaMaxCounts") {
+            let list = perSource.get(source) || [];
+            if (msg.type === "snapshot" || msg.type === "replicaMaxCounts") list = [];
+            list.push(msg);
+            perSource.set(source, list);
+            if (msg.last_updated_time) stamps[source] = msg.last_updated_time;
+          }
+        } catch (err) {
+          console.error(`Error parsing message for ${source}:`, err);
+        }
+      }
+
+      setData((prev) => {
+        const next = { ...prev };
+        if (initSources) {
+          for (const [s, v] of Object.entries(initSources)) next[s] = v.payload;
+        }
+        for (const [s, msgs] of perSource) {
+          let cur = next[s];
+          for (const msg of msgs) {
+            if (msg.type === "snapshot" || msg.type === "replicaMaxCounts") {
+              cur = msg.payload;
+            } else {
+              const deltas = Array.isArray(msg.payload) ? msg.payload : [msg.payload];
+              cur = applyDeltas(cur, deltas);
+            }
+          }
+          next[s] = cur;
+        }
+        return next;
+      });
+      if (Object.keys(stamps).length > 0) {
+        setlastUpdated((prev) => ({ ...prev, ...stamps }));
+      }
+    };
+
+    const enqueue = (source, raw) => {
+      bufRef.current.push({ source, raw });
+      if (bufRef.current.length >= MAX_BUFFER) {
+        if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+        flush();
+        return;
+      }
+      if (!flushTimerRef.current) flushTimerRef.current = setTimeout(flush, FLUSH_MS);
+    };
+
+    const connect = () => {
+      if (closed) return;
+      setStatus("connecting");
+      const es = new EventSource(UNIFIED_URL);
+      esRef.current = es;
+      es.onopen = () => {
+        retryRef.current = 0;
+        setStatus("connected");
+      };
+      es.onerror = () => {
+        es.close();
+        if (esRef.current === es) esRef.current = null;
+        setStatus("disconnected");
+        if (closed) return;
+        const timeout = Math.min(5000, 1000 * (retryRef.current + 1));
+        retryRef.current += 1;
+        reconnectTimerRef.current = setTimeout(connect, timeout);
+      };
+      es.addEventListener("init", (e) => enqueue("__init", e.data));
+      SOURCES.forEach((source) => {
+        es.addEventListener(source, (e) => enqueue(source, e.data));
+      });
+    };
+
+    connect();
+
+    return () => {
+      closed = true;
+      if (esRef.current) { esRef.current.close(); esRef.current = null; }
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
+      bufRef.current = [];
+    };
+  }, [todayDate]);
+  const branchCount = data.branchLoggedInNo?.["branch logged in No"] || "0";
+  const tellerCount = data.tellerLoggedInNo?.["teller logged in No"] || "0";
+  const repostingCount = data.repostingFail?.["repost fail"] || "0";
+  const neftInvalidDay = data.neftInvalidDay?.["NEFT INVALID COUNT(In 9Apps) "] || "0";
+  const neftInvalidNight = data.neftInvalidNight?.["NEFT NIGHT INVALID COUNT(In 9Apps) "] || "0";
+  const Mflags_d = typeof data.Mflags_d === "string"
+    ? data.Mflags_d
+    : (data.Mflags_d && Object.values(data.Mflags_d)[0]) || "";
+  return (
+    <>
+      <TopNavBar branchCount={branchCount} tellerCount={tellerCount} repostingCount={repostingCount} neftInvalidDay={neftInvalidDay} neftInvalidNight={neftInvalidNight} MFLAGS_D={Mflags_d} sendDataUp={handleDataFromChild} />
+      <Routes>
+        <Route path="/" element={<Dashboard data={data} lastUpdated={lastUpdated} />} />
+        <Route path="/night" element={<NightDashboard data={data} lastUpdated={lastUpdated} />} />
+        <Route path="/legend" element={<Legend data={data} />} />
+        <Route path="/cbs-flow" element={<CBSFlow />} />
+        <Route path="/queue_replica" element={<QueueReplica />} />
+        <Route path="/gateway-hive" element={<GatewayHive data={data} />} />
+        {/* <Route path="/milestone-details" element={<MilestoneDetails />} /> */}
+        <Route path="/branch-logged-in" element={<BranchLoggedIn data={data} />} />
+        <Route path="/teller-logged-in" element={<TellerLoggedIn />} />
+        <Route path="/txn-desc" element={<TxnDesc />} />
+        <Route path="/all-files" element={<AllFiles />} />
+        {/* <Route path="/upi-mr" element={<UpiMr data= {data}/>} /> */}
+        <Route path="/neft-invalid" element={<NeftInvalid />} />
+        {/* <Route path="/reposting-status" element={<RepostingStatus />} /> */}
+        <Route path="/repost-fail" element={<RepostFail data={data} lastUpdated={lastUpdated} />} />
+        <Route path="/rtgs-incoming-gateway" element={<RtgsIncomingGateway data={data} />} />
+        {/* <Route path="/rtgs-incoming-ack" element={<RtgsIncomingAck />} /> */}
+      </Routes>
+    </>
+  );
 }
+export default App;
