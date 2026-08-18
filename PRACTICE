@@ -1,4 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
+ 
+    
+        
+ import React, { useEffect, useRef, useState } from "react";
 import { Routes, Route } from "react-router-dom";
 import Dashboard from "./Dashboard";
 import NightDashboard from "./NightDashboard"
@@ -151,7 +154,10 @@ function App() {
   const [mdata, setMData] = useState(null);
 
   useEffect(() => {
-    const eventSource = new EventSource('http://localhost:8080/events/Mflags_d');
+    // FIX: use the same configurable base URL as the unified stream instead
+    // of a hardcoded localhost address, so this doesn't silently break
+    // outside local dev.
+    const eventSource = new EventSource(`${UNIFIED_URL}/Mflags_d`);
 
     eventSource.addEventListener('snapshot', (event) => {
       const parsedData = JSON.parse(event.data);
@@ -160,7 +166,7 @@ function App() {
 
     eventSource.addEventListener('delta', (event) => {
       const parsedData = JSON.parse(event.data);
-      
+
       setMData((prevData) => {
         if (!prevData || !prevData.payload) return prevData;
 
@@ -188,35 +194,40 @@ function App() {
     return () => eventSource.close();
   }, []);
 
-  const currentMFlagsDate = mdata?.payload?.MFLAGS_D || "No Date Yet";
-  console.log(currentMFlagsDate)
-
+  // FIX #1 (root cause of the reload bug): default to `null` instead of the
+  // string "No Date Yet". That placeholder string could never equal
+  // childData, so every comparison against it looked like a real date
+  // mismatch. We now derive an explicit `isMFlagsLoaded` flag and gate all
+  // comparisons on it, so nothing fires until we actually know today's
+  // server date.
+  const currentMFlagsDate = mdata?.payload?.MFLAGS_D || null;
+  const isMFlagsLoaded = currentMFlagsDate !== null;
 
   /////////////////////////////////////////////////////////////////
 
-
-  const isFirstRender = useRef(true);
-
+  // Decide whether we're viewing "today" (live SSE) or a historical date
+  // (fetch via /api/date_change). Runs whenever the selected date changes,
+  // or once MFLAGS_D finishes loading.
   useEffect(() => {
-    if (isFirstRender.current) {
-      isFirstRender.current = false;
-      setTodayDate(true)
-      return;
-    }
+    // FIX: don't compare anything until MFLAGS_D has actually loaded.
+    // Previously this ran immediately on mount with currentMFlagsDate
+    // still "No Date Yet", which looked like a mismatch and fired the
+    // date_change API on every page load.
+    if (!isMFlagsLoaded) return;
+    if (childData === null) return;
 
     let cancelled = false;
+
     if (childData === currentMFlagsDate) {
-      setTodayDate(true)
+      setTodayDate(true);
       return;
     }
-    if (childData === null) {
-      return;
-    }
-    setTodayDate(false)
+
+    setTodayDate(false);
     const params = new URLSearchParams({
       date: String(childData)
     });
-    console.log("calling date changes")
+    console.log("calling date changes");
     fetch(`http://localhost:8080/api/date_change?${params.toString()}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((json) => {
@@ -229,23 +240,32 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [childData]);
+  }, [childData, currentMFlagsDate, isMFlagsLoaded]);
 
   useEffect(() => {
-    if (childData === currentMFlagsDate) {
-      return;
+    if (!isMFlagsLoaded) return;
+    if (childData === currentMFlagsDate) return;
+    if (childData === null) return;
+    // FIX #3: guard against dateWiseData being null (e.g. a failed fetch
+    // above calls setDateWiseData(null)). Previously this read
+    // `dateWiseData.sources` unconditionally, which threw
+    // "Cannot read properties of null (reading 'sources')" on any fetch
+    // error.
+    if (dateWiseData?.sources) {
+      setData(dateWiseData.sources);
     }
-    if (childData === null) {
-      return;
-    }
-    setData(dateWiseData.sources)
-  }, [dateWiseData])
+  }, [dateWiseData, childData, currentMFlagsDate, isMFlagsLoaded]);
 
   useEffect(() => {
+    // FIX #2: rely solely on `todayDate` (already computed by the effect
+    // above) instead of re-checking childData/currentMFlagsDate here.
+    // The old check referenced values that weren't in this effect's
+    // dependency array, and — combined with the "No Date Yet" placeholder —
+    // it meant this comparison could see a mismatch on first mount and
+    // return before ever calling connect(), so the live SSE connection
+    // sometimes never started at all.
+    if (!todayDate) return;
 
-    if (childData !== currentMFlagsDate) {
-      return;
-    }
     let closed = false;
     console.log("events restarting date is todays date")
 
@@ -388,4 +408,3 @@ function App() {
     </>
   );
 }
-export default App;
