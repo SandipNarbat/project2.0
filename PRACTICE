@@ -1,317 +1,71 @@
 useEffect(() => {
-
-    if (!isMFlagsLoaded) {
+    if (!isMFlagsLoaded || childData === null) {
         return;
     }
 
-    if (childData === null) {
+    // Today → live SSE should handle the data
+    if (childData === currentMFlagsDate) {
+        console.log("Selected date is TODAY");
         return;
     }
 
-    // VERY IMPORTANT:
-    // SSE is allowed ONLY when selected date == server's current date.
-    const isToday = childData === currentMFlagsDate;
+    // Historical date → fetch historical data
+    const controller = new AbortController();
 
-    if (!isToday) {
-        console.log(
-            "Historical date selected. SSE will NOT connect.",
-            {
-                selected: childData,
-                current: currentMFlagsDate
-            }
-        );
+    const loadHistoricalData = async () => {
+        try {
+            const params = new URLSearchParams({
+                date: String(childData)
+            });
 
-        // Make absolutely sure an existing connection is closed.
-        if (esRef.current) {
-            esRef.current.close();
-            esRef.current = null;
-        }
-
-        if (reconnectTimerRef.current) {
-            clearTimeout(reconnectTimerRef.current);
-            reconnectTimerRef.current = null;
-        }
-
-        setStatus("disconnected");
-
-        return;
-    }
-
-    console.log(
-        "Today's date selected. Starting SSE.",
-        childData
-    );
-
-    let closed = false;
-
-    const flush = () => {
-        flushTimerRef.current = null;
-
-        const events = bufRef.current;
-        bufRef.current = [];
-
-        if (events.length === 0) {
-            return;
-        }
-
-        let initSources = null;
-        const perSource = new Map();
-        const stamps = {};
-
-        for (const { source, raw } of events) {
-
-            try {
-                const msg = JSON.parse(raw);
-
-                if (source === "__init") {
-
-                    initSources = msg.sources || {};
-
-                    if (msg.replicaMaxCounts) {
-                        initSources = {
-                            ...initSources,
-
-                            replicaMaxCounts: {
-                                payload:
-                                    msg.replicaMaxCounts.payload,
-
-                                last_updated_time:
-                                    msg.replicaMaxCounts.dateSuffix,
-                            }
-                        };
-                    }
-
-                    perSource.clear();
-
-                    for (const [s, v] of Object.entries(initSources)) {
-                        if (v?.last_updated_time) {
-                            stamps[s] = v.last_updated_time;
-                        }
-                    }
-
-                } else if (
-                    msg.type === "snapshot" ||
-                    msg.type === "delta" ||
-                    msg.type === "replicaMaxCounts"
-                ) {
-
-                    let list = perSource.get(source) || [];
-
-                    if (
-                        msg.type === "snapshot" ||
-                        msg.type === "replicaMaxCounts"
-                    ) {
-                        list = [];
-                    }
-
-                    list.push(msg);
-
-                    perSource.set(source, list);
-
-                    if (msg.last_updated_time) {
-                        stamps[source] = msg.last_updated_time;
-                    }
-                }
-
-            } catch (err) {
-                console.error(
-                    `Error parsing message for ${source}:`,
-                    err
-                );
-            }
-        }
-
-        setData((prev) => {
-
-            const next = { ...prev };
-
-            if (initSources) {
-
-                for (const [s, v] of Object.entries(initSources)) {
-                    next[s] = v.payload;
-                }
-            }
-
-            for (const [s, msgs] of perSource) {
-
-                let cur = next[s];
-
-                for (const msg of msgs) {
-
-                    if (
-                        msg.type === "snapshot" ||
-                        msg.type === "replicaMaxCounts"
-                    ) {
-                        cur = msg.payload;
-
-                    } else {
-
-                        const deltas =
-                            Array.isArray(msg.payload)
-                                ? msg.payload
-                                : [msg.payload];
-
-                        cur = applyDeltas(cur, deltas);
-                    }
-                }
-
-                next[s] = cur;
-            }
-
-            return next;
-        });
-
-        if (Object.keys(stamps).length > 0) {
-
-            setlastUpdated((prev) => ({
-                ...prev,
-                ...stamps
-            }));
-        }
-    };
-
-    const enqueue = (source, raw) => {
-
-        // Ignore anything after this effect has been invalidated.
-        if (closed) {
-            return;
-        }
-
-        bufRef.current.push({
-            source,
-            raw
-        });
-
-        if (bufRef.current.length >= MAX_BUFFER) {
-
-            if (flushTimerRef.current) {
-                clearTimeout(flushTimerRef.current);
-                flushTimerRef.current = null;
-            }
-
-            flush();
-
-            return;
-        }
-
-        if (!flushTimerRef.current) {
-
-            flushTimerRef.current =
-                setTimeout(flush, FLUSH_MS);
-        }
-    };
-
-    const connect = () => {
-
-        if (closed) {
-            return;
-        }
-
-        // Double protection.
-        if (childData !== currentMFlagsDate) {
             console.log(
-                "Prevented SSE connection because date is historical."
+                "Loading historical data:",
+                childData
             );
-            return;
+
+            const response = await fetch(
+                `http://localhost:8080/api/date_change?${params.toString()}`,
+                {
+                    signal: controller.signal
+                }
+            );
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const json = await response.json();
+
+            console.log(
+                "Historical data received:",
+                childData
+            );
+
+            setDateWiseData(json);
+
+        } catch (error) {
+
+            if (error.name === "AbortError") {
+                console.log(
+                    "Historical request cancelled:",
+                    childData
+                );
+                return;
+            }
+
+            console.error(
+                "Historical data error:",
+                error
+            );
+
+            setDateWiseData(null);
         }
-
-        setStatus("connecting");
-
-        const es = new EventSource(UNIFIED_URL);
-
-        esRef.current = es;
-
-        es.onopen = () => {
-
-            if (closed) {
-                es.close();
-                return;
-            }
-
-            retryRef.current = 0;
-            setStatus("connected");
-        };
-
-        es.onerror = () => {
-
-            es.close();
-
-            if (esRef.current === es) {
-                esRef.current = null;
-            }
-
-            if (closed) {
-                return;
-            }
-
-            setStatus("disconnected");
-
-            const timeout = Math.min(
-                5000,
-                1000 * (retryRef.current + 1)
-            );
-
-            retryRef.current += 1;
-
-            reconnectTimerRef.current =
-                setTimeout(() => {
-
-                    reconnectTimerRef.current = null;
-
-                    // CRITICAL:
-                    // Re-check the date before reconnecting.
-                    if (
-                        !closed &&
-                        childData === currentMFlagsDate
-                    ) {
-                        connect();
-                    }
-
-                }, timeout);
-        };
-
-        es.addEventListener(
-            "init",
-            (e) => enqueue("__init", e.data)
-        );
-
-        SOURCES.forEach((source) => {
-
-            es.addEventListener(
-                source,
-                (e) => enqueue(source, e.data)
-            );
-
-        });
     };
 
-    connect();
+    loadHistoricalData();
 
     return () => {
-
-        console.log(
-            "Cleaning up SSE because selected date changed."
-        );
-
-        closed = true;
-
-        if (esRef.current) {
-            esRef.current.close();
-            esRef.current = null;
-        }
-
-        if (reconnectTimerRef.current) {
-            clearTimeout(reconnectTimerRef.current);
-            reconnectTimerRef.current = null;
-        }
-
-        if (flushTimerRef.current) {
-            clearTimeout(flushTimerRef.current);
-            flushTimerRef.current = null;
-        }
-
-        bufRef.current = [];
-        retryRef.current = 0;
+        controller.abort();
     };
 
 }, [
@@ -319,10 +73,3 @@ useEffect(() => {
     currentMFlagsDate,
     isMFlagsLoaded
 ]);
-
-
-
-
-
-
-
