@@ -1,410 +1,328 @@
- 
-    
-        
- import React, { useEffect, useRef, useState } from "react";
-import { Routes, Route } from "react-router-dom";
-import Dashboard from "./Dashboard";
-import NightDashboard from "./NightDashboard"
-import Legend from "./pages/legend";
-import CBSFlow from "./pages/CBSFlow";
-import BranchTellerInterval from "./pages/BranchTellerInterval";
-import MilestoneDetails from "./pages/MilestoneDetails";
-import GatewayHive from "./pages/GatewayHive";
+useEffect(() => {
 
-import BranchLoggedIn from "./pages/BranchLoggedIn";
-import TellerLoggedIn from "./pages/TellerLoggedIn";
-import TxnDesc from "./pages/TxnDesc";
-import AllFiles from "./pages/AllFiles";
-import UpiMr from "./pages/UpiMr";
-import NeftInvalid from "./pages/NeftInvalid";
-import RepostingStatus from "./pages/RepostingStatus";
-import RepostFail from "./pages/RepostFail";
-import RtgsIncomingGateway from "./pages/RtgsIncomingGateway";
-// import RtgsIncomingAck from "./pages/RtgsIncomingAck";
-import TopNavBar from "./components/TopNavBar";
-import QueueReplica from "./blocks/QueueReplica";
-
-const SOURCES = [
-  "jobs",
-  "queue",
-  "context",
-  "trickle",
-  "space",
-  "branchLoggedInNo",
-  "tellerLoggedInNo",
-  "branchLoggedIn",
-  "repostingFail",
-  "neftInvalidNight",
-  "neftInvalidDay",
-  "UpiMrMax",
-  "RTGSngingGateway12Apps",
-  "PrLegend",
-  "NrLegend",
-  "DrLegend",
-  "RtgsIncoming",
-  "Mflags_d",
-  "RtgsOutgoing",
-  "rtgsIncomingPend",
-  "rtgsOutgoingPend",
-  "RTGSACKngingGateway12Apps",
-  "system",
-  "MQStatus",
-  "OCRNEFT",
-  "miscTxtCount",
-  "batchUpload",
-  "resourse",
-  "neftRepostFailPage",
-  "neftIncomingCount",
-  "mrHive",
-  "atmHive",
-  "b24Hive",
-  "inbHive",
-  "atmPorts",
-  "replicaMaxCounts",
-
-  //replica count
-  "replica_i",
-  "replica_I",
-  "replica_a",
-  "replica_b",
-  "replica_c",
-  "replica_d",
-  "replica_e",
-  "replica_f",
-  "replica_g",
-  "replica_h",
-  "replica_j",
-  "replica_k",
-  "replica_m",
-  "replica_n",
-  "replica_p",
-  "replica_q",
-
-
-  //night
-  "jobsNight",
-  "queueNight",
-  "in0800",
-  "BR0501",
-  "activeJobM",
-  "activeJobS1"
-];
-const UNIFIED_URL = import.meta.env.VITE_SSE_URL || "http://localhost:8080/events";
-
-const FLUSH_MS = 150;
-const MAX_BUFFER = 2000;
-
-function applyDeltas(sourceState, deltas) {
-  const next = { ...(sourceState || {}) };
-  for (const delta of deltas) {
-    if (delta.type === "new") {
-      next[delta.key] = delta.metrics;
-    } else if (delta.type === "update") {
-      if (Array.isArray(next[delta.key])) {
-        const arr = [...next[delta.key]];
-        delta.changes.forEach((change) => {
-          arr[change.index] = change.new;
-        });
-        next[delta.key] = arr;
-      } else {
-        next[delta.key] = delta.changes[0]?.new;
-      }
+    if (!isMFlagsLoaded) {
+        return;
     }
-  }
-  return next;
-}
 
-const formatDateToYYYYMMDD = (dateInput) => {
-  if (typeof dateInput === 'string' && /^\d{8}$/.test(dateInput)) {
-    return dateInput;
-  }
+    if (childData === null) {
+        return;
+    }
 
-  const dateObj = dateInput instanceof Date ? dateInput : new Date(dateInput);
+    // VERY IMPORTANT:
+    // SSE is allowed ONLY when selected date == server's current date.
+    const isToday = childData === currentMFlagsDate;
 
-  if (isNaN(dateObj.getTime())) {
-    return null;
-  }
-
-  const year = dateObj.getFullYear();
-  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-  const day = String(dateObj.getDate()).padStart(2, '0');
-
-  return `${year}${month}${day}`;
-};
-
-
-function App() {
-  const [data, setData] = useState({});
-  const [lastUpdated, setlastUpdated] = useState({});
-  const [status, setStatus] = useState("disconnected");
-  const esRef = useRef(null);
-  const bufRef = useRef([]);
-  const flushTimerRef = useRef(null);
-  const reconnectTimerRef = useRef(null);
-  const retryRef = useRef(0);
-  const [childData, setChildData] = React.useState(formatDateToYYYYMMDD(new Date()));
-  const [dateWiseData, setDateWiseData] = useState({})
-  const [todayDate, setTodayDate] = useState(true)
-
-  // Function to receive data
-  const handleDataFromChild = (data) => {
-    setChildData(data);
-  };
-  /////////////////////////////////////////////////////////////////
-  const [mdata, setMData] = useState(null);
-
-  useEffect(() => {
-    // FIX: use the same configurable base URL as the unified stream instead
-    // of a hardcoded localhost address, so this doesn't silently break
-    // outside local dev.
-    const eventSource = new EventSource(`${UNIFIED_URL}/Mflags_d`);
-
-    eventSource.addEventListener('snapshot', (event) => {
-      const parsedData = JSON.parse(event.data);
-      setMData(parsedData);
-    });
-
-    eventSource.addEventListener('delta', (event) => {
-      const parsedData = JSON.parse(event.data);
-
-      setMData((prevData) => {
-        if (!prevData || !prevData.payload) return prevData;
-
-        const updatedPayload = { ...prevData.payload };
-
-        parsedData.payload.forEach((change) => {
-          if (change.type === 'update' && change.key) {
-            const newValue = change.changes?.[0]?.new;
-            if (newValue !== undefined) {
-              updatedPayload[change.key] = newValue;
+    if (!isToday) {
+        console.log(
+            "Historical date selected. SSE will NOT connect.",
+            {
+                selected: childData,
+                current: currentMFlagsDate
             }
-          }
-        });
+        );
 
-        return {
-          ...prevData,
-          last_updated_time: parsedData.last_updated_time,
-          payload: updatedPayload
-        };
-      });
-    });
+        // Make absolutely sure an existing connection is closed.
+        if (esRef.current) {
+            esRef.current.close();
+            esRef.current = null;
+        }
 
-    eventSource.onerror = (err) => console.error('SSE Error:', err);
+        if (reconnectTimerRef.current) {
+            clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = null;
+        }
 
-    return () => eventSource.close();
-  }, []);
+        setStatus("disconnected");
 
-  // FIX #1 (root cause of the reload bug): default to `null` instead of the
-  // string "No Date Yet". That placeholder string could never equal
-  // childData, so every comparison against it looked like a real date
-  // mismatch. We now derive an explicit `isMFlagsLoaded` flag and gate all
-  // comparisons on it, so nothing fires until we actually know today's
-  // server date.
-  const currentMFlagsDate = mdata?.payload?.MFLAGS_D || null;
-  const isMFlagsLoaded = currentMFlagsDate !== null;
-
-  /////////////////////////////////////////////////////////////////
-
-  // Decide whether we're viewing "today" (live SSE) or a historical date
-  // (fetch via /api/date_change). Runs whenever the selected date changes,
-  // or once MFLAGS_D finishes loading.
-  useEffect(() => {
-    // FIX: don't compare anything until MFLAGS_D has actually loaded.
-    // Previously this ran immediately on mount with currentMFlagsDate
-    // still "No Date Yet", which looked like a mismatch and fired the
-    // date_change API on every page load.
-    if (!isMFlagsLoaded) return;
-    if (childData === null) return;
-
-    let cancelled = false;
-
-    if (childData === currentMFlagsDate) {
-      setTodayDate(true);
-      return;
+        return;
     }
 
-    setTodayDate(false);
-    const params = new URLSearchParams({
-      date: String(childData)
-    });
-    console.log("calling date changes");
-    fetch(`http://localhost:8080/api/date_change?${params.toString()}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-      .then((json) => {
-        if (!cancelled) setDateWiseData(json);
-      })
-      .catch(() => {
-        if (!cancelled) setDateWiseData(null);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [childData, currentMFlagsDate, isMFlagsLoaded]);
-
-  useEffect(() => {
-    if (!isMFlagsLoaded) return;
-    if (childData === currentMFlagsDate) return;
-    if (childData === null) return;
-    // FIX #3: guard against dateWiseData being null (e.g. a failed fetch
-    // above calls setDateWiseData(null)). Previously this read
-    // `dateWiseData.sources` unconditionally, which threw
-    // "Cannot read properties of null (reading 'sources')" on any fetch
-    // error.
-    if (dateWiseData?.sources) {
-      setData(dateWiseData.sources);
-    }
-  }, [dateWiseData, childData, currentMFlagsDate, isMFlagsLoaded]);
-
-  useEffect(() => {
-    // FIX #2: rely solely on `todayDate` (already computed by the effect
-    // above) instead of re-checking childData/currentMFlagsDate here.
-    // The old check referenced values that weren't in this effect's
-    // dependency array, and — combined with the "No Date Yet" placeholder —
-    // it meant this comparison could see a mismatch on first mount and
-    // return before ever calling connect(), so the live SSE connection
-    // sometimes never started at all.
-    if (!todayDate) return;
+    console.log(
+        "Today's date selected. Starting SSE.",
+        childData
+    );
 
     let closed = false;
-    console.log("events restarting date is todays date")
 
     const flush = () => {
-      flushTimerRef.current = null;
-      const events = bufRef.current;
-      bufRef.current = [];
-      if (events.length === 0) return;
+        flushTimerRef.current = null;
 
-      let initSources = null;
-      const perSource = new Map();
-      const stamps = {};
-      for (const { source, raw } of events) {
-        try {
-          const msg = JSON.parse(raw);
-          if (source === "replicaMaxCounts") console.log(`live log detected: ${msg}`);
-          if (source === "__init") {
-            initSources = msg.sources || {};
-            if (msg.replicaMaxCounts) {
-              initSources = {
-                ...initSources, replicaMaxCounts: {
-                  payload: msg.replicaMaxCounts.payload, last_updated_time: msg.replicaMaxCounts.dateSuffix,
+        const events = bufRef.current;
+        bufRef.current = [];
+
+        if (events.length === 0) {
+            return;
+        }
+
+        let initSources = null;
+        const perSource = new Map();
+        const stamps = {};
+
+        for (const { source, raw } of events) {
+
+            try {
+                const msg = JSON.parse(raw);
+
+                if (source === "__init") {
+
+                    initSources = msg.sources || {};
+
+                    if (msg.replicaMaxCounts) {
+                        initSources = {
+                            ...initSources,
+
+                            replicaMaxCounts: {
+                                payload:
+                                    msg.replicaMaxCounts.payload,
+
+                                last_updated_time:
+                                    msg.replicaMaxCounts.dateSuffix,
+                            }
+                        };
+                    }
+
+                    perSource.clear();
+
+                    for (const [s, v] of Object.entries(initSources)) {
+                        if (v?.last_updated_time) {
+                            stamps[s] = v.last_updated_time;
+                        }
+                    }
+
+                } else if (
+                    msg.type === "snapshot" ||
+                    msg.type === "delta" ||
+                    msg.type === "replicaMaxCounts"
+                ) {
+
+                    let list = perSource.get(source) || [];
+
+                    if (
+                        msg.type === "snapshot" ||
+                        msg.type === "replicaMaxCounts"
+                    ) {
+                        list = [];
+                    }
+
+                    list.push(msg);
+
+                    perSource.set(source, list);
+
+                    if (msg.last_updated_time) {
+                        stamps[source] = msg.last_updated_time;
+                    }
                 }
-              }
-            }
-            perSource.clear();
-            for (const [s, v] of Object.entries(initSources)) {
-              if (v?.last_updated_time) stamps[s] = v.last_updated_time;
-            }
-          } else if (msg.type === "snapshot" || msg.type === "delta" || msg.type === "replicaMaxCounts") {
-            let list = perSource.get(source) || [];
-            if (msg.type === "snapshot" || msg.type === "replicaMaxCounts") list = [];
-            list.push(msg);
-            perSource.set(source, list);
-            if (msg.last_updated_time) stamps[source] = msg.last_updated_time;
-          }
-        } catch (err) {
-          console.error(`Error parsing message for ${source}:`, err);
-        }
-      }
 
-      setData((prev) => {
-        const next = { ...prev };
-        if (initSources) {
-          for (const [s, v] of Object.entries(initSources)) next[s] = v.payload;
-        }
-        for (const [s, msgs] of perSource) {
-          let cur = next[s];
-          for (const msg of msgs) {
-            if (msg.type === "snapshot" || msg.type === "replicaMaxCounts") {
-              cur = msg.payload;
-            } else {
-              const deltas = Array.isArray(msg.payload) ? msg.payload : [msg.payload];
-              cur = applyDeltas(cur, deltas);
+            } catch (err) {
+                console.error(
+                    `Error parsing message for ${source}:`,
+                    err
+                );
             }
-          }
-          next[s] = cur;
         }
-        return next;
-      });
-      if (Object.keys(stamps).length > 0) {
-        setlastUpdated((prev) => ({ ...prev, ...stamps }));
-      }
+
+        setData((prev) => {
+
+            const next = { ...prev };
+
+            if (initSources) {
+
+                for (const [s, v] of Object.entries(initSources)) {
+                    next[s] = v.payload;
+                }
+            }
+
+            for (const [s, msgs] of perSource) {
+
+                let cur = next[s];
+
+                for (const msg of msgs) {
+
+                    if (
+                        msg.type === "snapshot" ||
+                        msg.type === "replicaMaxCounts"
+                    ) {
+                        cur = msg.payload;
+
+                    } else {
+
+                        const deltas =
+                            Array.isArray(msg.payload)
+                                ? msg.payload
+                                : [msg.payload];
+
+                        cur = applyDeltas(cur, deltas);
+                    }
+                }
+
+                next[s] = cur;
+            }
+
+            return next;
+        });
+
+        if (Object.keys(stamps).length > 0) {
+
+            setlastUpdated((prev) => ({
+                ...prev,
+                ...stamps
+            }));
+        }
     };
 
     const enqueue = (source, raw) => {
-      bufRef.current.push({ source, raw });
-      if (bufRef.current.length >= MAX_BUFFER) {
-        if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
-        flush();
-        return;
-      }
-      if (!flushTimerRef.current) flushTimerRef.current = setTimeout(flush, FLUSH_MS);
+
+        // Ignore anything after this effect has been invalidated.
+        if (closed) {
+            return;
+        }
+
+        bufRef.current.push({
+            source,
+            raw
+        });
+
+        if (bufRef.current.length >= MAX_BUFFER) {
+
+            if (flushTimerRef.current) {
+                clearTimeout(flushTimerRef.current);
+                flushTimerRef.current = null;
+            }
+
+            flush();
+
+            return;
+        }
+
+        if (!flushTimerRef.current) {
+
+            flushTimerRef.current =
+                setTimeout(flush, FLUSH_MS);
+        }
     };
 
     const connect = () => {
-      if (closed) return;
-      setStatus("connecting");
-      const es = new EventSource(UNIFIED_URL);
-      esRef.current = es;
-      es.onopen = () => {
-        retryRef.current = 0;
-        setStatus("connected");
-      };
-      es.onerror = () => {
-        es.close();
-        if (esRef.current === es) esRef.current = null;
-        setStatus("disconnected");
-        if (closed) return;
-        const timeout = Math.min(5000, 1000 * (retryRef.current + 1));
-        retryRef.current += 1;
-        reconnectTimerRef.current = setTimeout(connect, timeout);
-      };
-      es.addEventListener("init", (e) => enqueue("__init", e.data));
-      SOURCES.forEach((source) => {
-        es.addEventListener(source, (e) => enqueue(source, e.data));
-      });
+
+        if (closed) {
+            return;
+        }
+
+        // Double protection.
+        if (childData !== currentMFlagsDate) {
+            console.log(
+                "Prevented SSE connection because date is historical."
+            );
+            return;
+        }
+
+        setStatus("connecting");
+
+        const es = new EventSource(UNIFIED_URL);
+
+        esRef.current = es;
+
+        es.onopen = () => {
+
+            if (closed) {
+                es.close();
+                return;
+            }
+
+            retryRef.current = 0;
+            setStatus("connected");
+        };
+
+        es.onerror = () => {
+
+            es.close();
+
+            if (esRef.current === es) {
+                esRef.current = null;
+            }
+
+            if (closed) {
+                return;
+            }
+
+            setStatus("disconnected");
+
+            const timeout = Math.min(
+                5000,
+                1000 * (retryRef.current + 1)
+            );
+
+            retryRef.current += 1;
+
+            reconnectTimerRef.current =
+                setTimeout(() => {
+
+                    reconnectTimerRef.current = null;
+
+                    // CRITICAL:
+                    // Re-check the date before reconnecting.
+                    if (
+                        !closed &&
+                        childData === currentMFlagsDate
+                    ) {
+                        connect();
+                    }
+
+                }, timeout);
+        };
+
+        es.addEventListener(
+            "init",
+            (e) => enqueue("__init", e.data)
+        );
+
+        SOURCES.forEach((source) => {
+
+            es.addEventListener(
+                source,
+                (e) => enqueue(source, e.data)
+            );
+
+        });
     };
 
     connect();
 
     return () => {
-      closed = true;
-      if (esRef.current) { esRef.current.close(); esRef.current = null; }
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
-      bufRef.current = [];
+
+        console.log(
+            "Cleaning up SSE because selected date changed."
+        );
+
+        closed = true;
+
+        if (esRef.current) {
+            esRef.current.close();
+            esRef.current = null;
+        }
+
+        if (reconnectTimerRef.current) {
+            clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = null;
+        }
+
+        if (flushTimerRef.current) {
+            clearTimeout(flushTimerRef.current);
+            flushTimerRef.current = null;
+        }
+
+        bufRef.current = [];
+        retryRef.current = 0;
     };
-  }, [todayDate]);
-  const branchCount = data.branchLoggedInNo?.["branch logged in No"] || "0";
-  const tellerCount = data.tellerLoggedInNo?.["teller logged in No"] || "0";
-  const repostingCount = data.repostingFail?.["repost fail"] || "0";
-  const neftInvalidDay = data.neftInvalidDay?.["NEFT INVALID COUNT(In 9Apps) "] || "0";
-  const neftInvalidNight = data.neftInvalidNight?.["NEFT NIGHT INVALID COUNT(In 9Apps) "] || "0";
-  const Mflags_d = typeof data.Mflags_d === "string"
-    ? data.Mflags_d
-    : (data.Mflags_d && Object.values(data.Mflags_d)[0]) || "";
-  return (
-    <>
-      <TopNavBar branchCount={branchCount} tellerCount={tellerCount} repostingCount={repostingCount} neftInvalidDay={neftInvalidDay} neftInvalidNight={neftInvalidNight} MFLAGS_D={Mflags_d} sendDataUp={handleDataFromChild} />
-      <Routes>
-        <Route path="/" element={<Dashboard data={data} lastUpdated={lastUpdated} />} />
-        <Route path="/night" element={<NightDashboard data={data} lastUpdated={lastUpdated} />} />
-        <Route path="/legend" element={<Legend data={data} />} />
-        <Route path="/cbs-flow" element={<CBSFlow />} />
-        <Route path="/queue_replica" element={<QueueReplica />} />
-        <Route path="/gateway-hive" element={<GatewayHive data={data} />} />
-        {/* <Route path="/milestone-details" element={<MilestoneDetails />} /> */}
-        <Route path="/branch-logged-in" element={<BranchLoggedIn data={data} />} />
-        <Route path="/teller-logged-in" element={<TellerLoggedIn />} />
-        <Route path="/txn-desc" element={<TxnDesc />} />
-        <Route path="/all-files" element={<AllFiles />} />
-        {/* <Route path="/upi-mr" element={<UpiMr data= {data}/>} /> */}
-        <Route path="/neft-invalid" element={<NeftInvalid />} />
-        {/* <Route path="/reposting-status" element={<RepostingStatus />} /> */}
-        <Route path="/repost-fail" element={<RepostFail data={data} lastUpdated={lastUpdated} />} />
-        <Route path="/rtgs-incoming-gateway" element={<RtgsIncomingGateway data={data} />} />
-        {/* <Route path="/rtgs-incoming-ack" element={<RtgsIncomingAck />} /> */}
-      </Routes>
-    </>
-  );
-}
+
+}, [
+    childData,
+    currentMFlagsDate,
+    isMFlagsLoaded
+]);
+
+
+
+
+
+
+
