@@ -1,350 +1,66 @@
 useEffect(() => {
 
+    // MFLAGS has not arrived yet.
+    // DO NOTHING to the main SSE.
+    if (!isMFlagsLoaded) {
+        return;
+    }
+
     if (childData === null) {
         return;
     }
 
+    const isToday =
+        childData === currentMFlagsDate;
+
+
+    if (isToday) {
+
+        console.log(
+            "MFLAGS loaded: selected date is TODAY."
+        );
+
+        return;
+    }
+
+
     console.log(
-        "Starting MAIN SSE for selected date:",
-        childData
+        "MFLAGS loaded: selected date is HISTORICAL.",
+        {
+            selected: childData,
+            current: currentMFlagsDate
+        }
     );
 
-    let closed = false;
 
-    const flush = () => {
-
-        flushTimerRef.current = null;
-
-        const events = bufRef.current;
-        bufRef.current = [];
-
-        if (events.length === 0) {
-            return;
-        }
-
-        let initSources = null;
-        const perSource = new Map();
-        const stamps = {};
-
-        for (const { source, raw } of events) {
-
-            try {
-
-                const msg = JSON.parse(raw);
-
-                if (source === "__init") {
-
-                    initSources = msg.sources || {};
-
-                    if (msg.replicaMaxCounts) {
-
-                        initSources = {
-                            ...initSources,
-
-                            replicaMaxCounts: {
-                                payload:
-                                    msg.replicaMaxCounts.payload,
-
-                                last_updated_time:
-                                    msg.replicaMaxCounts.dateSuffix,
-                            }
-                        };
-                    }
-
-                    perSource.clear();
-
-                    for (
-                        const [s, v]
-                        of Object.entries(initSources)
-                    ) {
-
-                        if (v?.last_updated_time) {
-                            stamps[s] =
-                                v.last_updated_time;
-                        }
-                    }
-
-                } else if (
-                    msg.type === "snapshot" ||
-                    msg.type === "delta" ||
-                    msg.type === "replicaMaxCounts"
-                ) {
-
-                    let list =
-                        perSource.get(source) || [];
-
-                    if (
-                        msg.type === "snapshot" ||
-                        msg.type === "replicaMaxCounts"
-                    ) {
-                        list = [];
-                    }
-
-                    list.push(msg);
-
-                    perSource.set(source, list);
-
-                    if (msg.last_updated_time) {
-                        stamps[source] =
-                            msg.last_updated_time;
-                    }
-                }
-
-            } catch (err) {
-
-                console.error(
-                    `Error parsing message for ${source}:`,
-                    err
-                );
-            }
-        }
-
-        setData((prev) => {
-
-            const next = { ...prev };
-
-            if (initSources) {
-
-                for (
-                    const [s, v]
-                    of Object.entries(initSources)
-                ) {
-
-                    next[s] = v.payload;
-                }
-            }
-
-            for (
-                const [s, msgs]
-                of perSource
-            ) {
-
-                let cur = next[s];
-
-                for (const msg of msgs) {
-
-                    if (
-                        msg.type === "snapshot" ||
-                        msg.type === "replicaMaxCounts"
-                    ) {
-
-                        cur = msg.payload;
-
-                    } else {
-
-                        const deltas =
-                            Array.isArray(msg.payload)
-                                ? msg.payload
-                                : [msg.payload];
-
-                        cur =
-                            applyDeltas(
-                                cur,
-                                deltas
-                            );
-                    }
-                }
-
-                next[s] = cur;
-            }
-
-            return next;
-        });
-
-        if (Object.keys(stamps).length > 0) {
-
-            setlastUpdated((prev) => ({
-                ...prev,
-                ...stamps
-            }));
-        }
-    };
-
-
-    const enqueue = (source, raw) => {
-
-        if (closed) {
-            return;
-        }
-
-        bufRef.current.push({
-            source,
-            raw
-        });
-
-        if (
-            bufRef.current.length >=
-            MAX_BUFFER
-        ) {
-
-            if (flushTimerRef.current) {
-
-                clearTimeout(
-                    flushTimerRef.current
-                );
-
-                flushTimerRef.current = null;
-            }
-
-            flush();
-
-            return;
-        }
-
-        if (!flushTimerRef.current) {
-
-            flushTimerRef.current =
-                setTimeout(
-                    flush,
-                    FLUSH_MS
-                );
-        }
-    };
-
-
-    const connect = () => {
-
-        if (closed) {
-            return;
-        }
+    // Historical date.
+    // Main SSE must not remain connected.
+    if (esRef.current) {
 
         console.log(
-            "Connecting MAIN SSE..."
+            "Closing MAIN SSE because selected date is historical."
         );
 
-        setStatus("connecting");
+        esRef.current.close();
 
-        const es =
-            new EventSource(
-                UNIFIED_URL
-            );
-
-        esRef.current = es;
+        esRef.current = null;
+    }
 
 
-        es.onopen = () => {
+    if (reconnectTimerRef.current) {
 
-            if (closed) {
-
-                es.close();
-                return;
-            }
-
-            retryRef.current = 0;
-
-            setStatus("connected");
-
-            console.log(
-                "MAIN SSE connected."
-            );
-        };
-
-
-        es.onerror = () => {
-
-            es.close();
-
-            if (esRef.current === es) {
-
-                esRef.current = null;
-            }
-
-            if (closed) {
-                return;
-            }
-
-            setStatus("disconnected");
-
-            const timeout =
-                Math.min(
-                    5000,
-                    1000 *
-                    (retryRef.current + 1)
-                );
-
-            retryRef.current += 1;
-
-            reconnectTimerRef.current =
-                setTimeout(() => {
-
-                    reconnectTimerRef.current =
-                        null;
-
-                    if (!closed) {
-                        connect();
-                    }
-
-                }, timeout);
-        };
-
-
-        es.addEventListener(
-            "init",
-            (e) =>
-                enqueue(
-                    "__init",
-                    e.data
-                )
+        clearTimeout(
+            reconnectTimerRef.current
         );
 
-
-        SOURCES.forEach((source) => {
-
-            es.addEventListener(
-                source,
-                (e) =>
-                    enqueue(
-                        source,
-                        e.data
-                    )
-            );
-
-        });
-    };
+        reconnectTimerRef.current = null;
+    }
 
 
-    connect();
-
-
-    return () => {
-
-        console.log(
-            "Cleaning up MAIN SSE because selected date changed."
-        );
-
-        closed = true;
-
-        if (esRef.current) {
-
-            esRef.current.close();
-
-            esRef.current = null;
-        }
-
-        if (reconnectTimerRef.current) {
-
-            clearTimeout(
-                reconnectTimerRef.current
-            );
-
-            reconnectTimerRef.current = null;
-        }
-
-        if (flushTimerRef.current) {
-
-            clearTimeout(
-                flushTimerRef.current
-            );
-
-            flushTimerRef.current = null;
-        }
-
-        bufRef.current = [];
-
-        retryRef.current = 0;
-
-    };
+    setStatus("disconnected");
 
 }, [
+    isMFlagsLoaded,
+    currentMFlagsDate,
     childData
 ]);
