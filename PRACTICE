@@ -1,15 +1,101 @@
-useEffect(() => {
+const UNIFIED_URL = import.meta.env.VITE_SSE_URL || "/events";
+
+const FLUSH_MS = 150;
+const MAX_BUFFER = 2000;
+
+function applyDeltas(sourceState, deltas) {
+  const next = { ...(sourceState || {}) };
+  for (const delta of deltas) {
+    if (delta.type === "new") {
+      next[delta.key] = delta.metrics;
+    } else if (delta.type === "update") {
+      if (Array.isArray(next[delta.key])) {
+        const arr = [...next[delta.key]];
+        delta.changes.forEach((change) => {
+          arr[change.index] = change.new;
+        });
+        next[delta.key] = arr;
+      } else {
+        next[delta.key] = delta.changes[0]?.new;
+      }
+    }
+  }
+  return next;
+}
+
+
+function App() {
+  const [data, setData] = useState({});
+  const [lastUpdated, setlastUpdated] = useState({});
+  const [status, setStatus] = useState("disconnected");
+  const esRef = useRef(null);
+  const bufRef = useRef([]);
+  const flushTimerRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const retryRef = useRef(0);
+  const [childData, setChildData] = React.useState(null);
+  const [dateWiseData, setDateWiseData] = useState({})
+  const [loading, setLoading] = useState(false);
+
+  const handleDataFromChild = (data) => {
+    setChildData(data);
+  };
+  const [mdata, setMData] = useState(null);
+
+  useEffect(() => {
+
+    const eventSource = new EventSource(`${UNIFIED_URL}/Mflags_d`);
+
+    eventSource.addEventListener('snapshot', (event) => {
+      const parsedData = JSON.parse(event.data);
+      setMData(parsedData);
+    });
+
+    eventSource.addEventListener('delta', (event) => {
+      const parsedData = JSON.parse(event.data);
+
+      setMData((prevData) => {
+        if (!prevData || !prevData.payload) return prevData;
+
+        const updatedPayload = { ...prevData.payload };
+
+        parsedData.payload.forEach((change) => {
+          if (change.type === 'update' && change.key) {
+            const newValue = change.changes?.[0]?.new;
+            if (newValue !== undefined) {
+              updatedPayload[change.key] = newValue;
+            }
+          }
+        });
+
+        return {
+          ...prevData,
+          last_updated_time: parsedData.last_updated_time,
+          payload: updatedPayload
+        };
+      });
+    });
+
+    eventSource.onerror = (err) => console.error('SSE Error:', err);
+
+    return () => eventSource.close();
+  }, []);
+
+
+  const currentMFlagsDate = mdata?.payload?.MFLAGS_D || null;
+  const isMFlagsLoaded = currentMFlagsDate !== null;
+
+  useEffect(() => {
     if (!isMFlagsLoaded || childData === null) {
+        console.log("MGLAG is not loaded yet waiting for it .....")
         return;
     }
 
-    // Today → live SSE should handle the data
     if (childData === currentMFlagsDate) {
         console.log("Selected date is TODAY");
         return;
     }
 
-    // Historical date → fetch historical data
     const controller = new AbortController();
 
     const loadHistoricalData = async () => {
@@ -22,9 +108,11 @@ useEffect(() => {
                 "Loading historical data:",
                 childData
             );
+            setLoading(true)
+
 
             const response = await fetch(
-                `http://localhost:8080/api/date_change?${params.toString()}`,
+                `api/date_change?${params.toString()}`,
                 {
                     signal: controller.signal
                 }
@@ -40,7 +128,7 @@ useEffect(() => {
                 "Historical data received:",
                 childData
             );
-
+            setLoading(false)
             setDateWiseData(json);
 
         } catch (error) {
@@ -66,6 +154,331 @@ useEffect(() => {
 
     return () => {
         controller.abort();
+    };
+
+}, [
+    childData,
+    currentMFlagsDate,
+    isMFlagsLoaded
+]);
+
+  useEffect(() => {
+    if (!isMFlagsLoaded) return;
+    if (childData === currentMFlagsDate) return;
+    if (childData === null) return;
+  
+    if (dateWiseData?.sources) {
+      setData(dateWiseData.sources);
+    }
+  }, [dateWiseData, childData, currentMFlagsDate, isMFlagsLoaded]);
+
+useEffect(() => {
+
+    if (!isMFlagsLoaded) {
+        return;
+    }
+
+    if (childData === null) {
+        return;
+    }
+
+    const isToday = childData === currentMFlagsDate;
+
+    if (!isToday) {
+        console.log(
+            "Historical date selected. SSE will NOT connect.",
+            {
+                selected: childData,
+                current: currentMFlagsDate
+            }
+        );
+
+        if (esRef.current) {
+            esRef.current.close();
+            esRef.current = null;
+        }
+
+        if (reconnectTimerRef.current) {
+            clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = null;
+        }
+
+        setStatus("disconnected");
+
+        return;
+    }
+
+    console.log(
+        "Today's date selected. Starting SSE.",
+        childData
+    );
+
+    let closed = false;
+
+    const flush = () => {
+        flushTimerRef.current = null;
+
+        const events = bufRef.current;
+        bufRef.current = [];
+
+        if (events.length === 0) {
+            return;
+        }
+
+        let initSources = null;
+        const perSource = new Map();
+        const stamps = {};
+
+        for (const { source, raw } of events) {
+
+            try {
+                const msg = JSON.parse(raw);
+
+                if (source === "__init") {
+
+                    initSources = msg.sources || {};
+
+                    if (msg.replicaMaxCounts) {
+                        initSources = {
+                            ...initSources,
+
+                            replicaMaxCounts: {
+                                payload:
+                                    msg.replicaMaxCounts.payload,
+
+                                last_updated_time:
+                                    msg.replicaMaxCounts.dateSuffix,
+                            }
+                        };
+                    }
+
+                    perSource.clear();
+
+                    for (const [s, v] of Object.entries(initSources)) {
+                        if (v?.last_updated_time) {
+                            stamps[s] = v.last_updated_time;
+                        }
+                    }
+
+                } else if (
+                    msg.type === "snapshot" ||
+                    msg.type === "delta" ||
+                    msg.type === "replicaMaxCounts"
+                ) {
+
+                    let list = perSource.get(source) || [];
+
+                    if (
+                        msg.type === "snapshot" ||
+                        msg.type === "replicaMaxCounts"
+                    ) {
+                        list = [];
+                    }
+
+                    list.push(msg);
+
+                    perSource.set(source, list);
+
+                    if (msg.last_updated_time) {
+                        stamps[source] = msg.last_updated_time;
+                    }
+                }
+
+            } catch (err) {
+                console.error(
+                    `Error parsing message for ${source}:`,
+                    err
+                );
+            }
+        }
+
+        setData((prev) => {
+
+            const next = { ...prev };
+
+            if (initSources) {
+
+                for (const [s, v] of Object.entries(initSources)) {
+                    next[s] = v.payload;
+                }
+            }
+
+            for (const [s, msgs] of perSource) {
+
+                let cur = next[s];
+
+                for (const msg of msgs) {
+
+                    if (
+                        msg.type === "snapshot" ||
+                        msg.type === "replicaMaxCounts"
+                    ) {
+                        cur = msg.payload;
+
+                    } else {
+
+                        const deltas =
+                            Array.isArray(msg.payload)
+                                ? msg.payload
+                                : [msg.payload];
+
+                        cur = applyDeltas(cur, deltas);
+                    }
+                }
+
+                next[s] = cur;
+            }
+
+            return next;
+        });
+
+        if (Object.keys(stamps).length > 0) {
+
+            setlastUpdated((prev) => ({
+                ...prev,
+                ...stamps
+            }));
+        }
+    };
+
+    const enqueue = (source, raw) => {
+
+        if (closed) {
+            return;
+        }
+
+        bufRef.current.push({
+            source,
+            raw
+        });
+
+        if (bufRef.current.length >= MAX_BUFFER) {
+
+            if (flushTimerRef.current) {
+                clearTimeout(flushTimerRef.current);
+                flushTimerRef.current = null;
+            }
+
+            flush();
+
+            return;
+        }
+
+        if (!flushTimerRef.current) {
+
+            flushTimerRef.current =
+                setTimeout(flush, FLUSH_MS);
+        }
+    };
+
+    const connect = () => {
+
+        if (closed) {
+            return;
+        }
+
+        if (childData !== currentMFlagsDate) {
+            console.log(
+                "Prevented SSE connection because date is historical."
+            );
+            return;
+        }
+
+        setStatus("connecting");
+
+        const es = new EventSource(UNIFIED_URL);
+
+        esRef.current = es;
+
+        es.onopen = () => {
+
+            if (closed) {
+                es.close();
+                return;
+            }
+
+            retryRef.current = 0;
+            setStatus("connected");
+        };
+
+        es.onerror = () => {
+
+            es.close();
+
+            if (esRef.current === es) {
+                esRef.current = null;
+            }
+
+            if (closed) {
+                return;
+            }
+
+            setStatus("disconnected");
+
+            const timeout = Math.min(
+                5000,
+                1000 * (retryRef.current + 1)
+            );
+
+            retryRef.current += 1;
+
+            reconnectTimerRef.current =
+                setTimeout(() => {
+
+                    reconnectTimerRef.current = null;
+
+                    if (
+                        !closed &&
+                        childData === currentMFlagsDate
+                    ) {
+                        connect();
+                    }
+
+                }, timeout);
+        };
+
+        es.addEventListener(
+            "init",
+            (e) => enqueue("__init", e.data)
+        );
+
+        SOURCES.forEach((source) => {
+
+            es.addEventListener(
+                source,
+                (e) => enqueue(source, e.data)
+            );
+
+        });
+    };
+
+    connect();
+
+    return () => {
+
+        console.log(
+            "Cleaning up SSE because selected date changed."
+        );
+
+        closed = true;
+
+        if (esRef.current) {
+            esRef.current.close();
+            esRef.current = null;
+        }
+
+        if (reconnectTimerRef.current) {
+            clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = null;
+        }
+
+        if (flushTimerRef.current) {
+            clearTimeout(flushTimerRef.current);
+            flushTimerRef.current = null;
+        }
+
+        bufRef.current = [];
+        retryRef.current = 0;
     };
 
 }, [
