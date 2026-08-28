@@ -1,596 +1,448 @@
-const UNIFIED_URL = import.meta.env.VITE_SSE_URL || "/events";
 
-const FLUSH_MS = 150;
-const MAX_BUFFER = 2000;
+const chokidar = require('chokidar');
+const fs = require('fs');
+const fsp = require("fs/promises");
+const path = require('path');
+const { finished } = require('stream');
+const { promisify } = require('util');
+const finishedPromise = promisify(finished);
 
-function applyDeltas(sourceState, deltas) {
-    const next = { ...(sourceState || {}) };
-    for (const delta of deltas) {
-        if (delta.type === "new") {
-            next[delta.key] = delta.metrics;
-        } else if (delta.type === "update") {
-            if (Array.isArray(next[delta.key])) {
-                const arr = [...next[delta.key]];
-                delta.changes.forEach((change) => {
-                    arr[change.index] = change.new;
-                });
-                next[delta.key] = arr;
-            } else {
-                next[delta.key] = delta.changes[0]?.new;
-            }
+
+const WATCH_DIR = "./portal_data/";
+const DATE_FILE = path.join(WATCH_DIR, 'MFLAGS_D');
+const DEBOUNCE_DELAY = 100;
+
+
+
+// State
+let CURRENT_DATE = null;
+let mergeTimeout;
+let watcher;
+const pendingChanges = new Map();
+let GROUP_RULES = [];
+
+const MQ_STATUS_SUFFIXES = ['i', 'I', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'j', 'k', 'm', 'n', 'p', 'q'];
+const MQ_STATUS_GROUPS = [
+    MQ_STATUS_SUFFIXES.map(s => `mq_rtgs_status_${s}.txt`),
+    MQ_STATUS_SUFFIXES.map(s => `mq_neft_status_${s}.txt`),
+    MQ_STATUS_SUFFIXES.map(s => `mq_imps_status_${s}.txt`),
+];
+
+
+function initializeGroupRules(date) {
+    return [
+        {
+            fileNames: [`tf_pen_pro_i.txt_${date}`, `tf_pen_pro_I.txt_${date}`, `tf_pen_pro_a.txt_${date}`, `tf_pen_pro_b.txt_${date}`, `tf_pen_pro_c.txt_${date}`, `tf_pen_pro_d.txt_${date}`, `tf_pen_pro_e.txt_${date}`, `tf_pen_pro_f.txt_${date}`, `tf_pen_pro_g.txt_${date}`, `tf_pen_pro_h.txt_${date}`, `tf_pen_pro_j.txt_${date}`, `tf_pen_pro_k.txt_${date}`, `tf_pen_pro_m.txt_${date}`, `tf_pen_pro_n.txt_${date}`, `tf_pen_pro_p.txt_${date}`, `tf_pen_pro_q.txt_${date}`],
+            output: `TRICKLEFEED_MASTER.txt_${date}`,
+            function: "trickleMerge"
+        },
+        // {
+
+        //     fileNames: MQ_STATUS_GROUPS.flat(),
+        //     output: `mq_status_16apps.txt.${date}`,
+        //     function: "mqStatusMerge"
+        // },
+        // {
+
+        //     fileNames: [`atm_PORT_DT_app1.txt.${date}`, `atm_PORT_DT_app2.txt.${date}`, `atm_PORT_DT_app3.txt.${date}`, `atm_PORT_DT_app4.txt.${date}`, `atm_PORT_DT_app5.txt.${date}`, `atm_PORT_DT_app6.txt.${date}`, `atm_PORT_DT_app7.txt.${date}`, `atm_PORT_DT_app8.txt.${date}`, `atm_PORT_DT_app9.txt.${date}`, `atm_PORT_DT_app10.txt.${date}`, `atm_PORT_DT_app11.txt.${date}`, `atm_PORT_DT_app12.txt.${date}`, `atm_PORT_DT_app13.txt.${date}`, `atm_PORT_DT_app14.txt.${date}`, `atm_PORT_DT_app15.txt.${date}`, `atm_PORT_DT_app16.txt.${date}`],
+        //     output: `atm_merge.txt.${date}`,
+        //     function: "atmMerge"
+        // },
+        // {
+
+        //     fileNames: [`i_ack_incoming.txt`, `a_ack_incoming.txt`, `b_ack_incoming.txt`, `c_ack_incoming.txt`, `d_ack_incoming.txt`],
+        //     output: `rtgs_ack_incoming.txt.${date}`,
+        //     function: "rtgsAckIncoming"
+        // }
+    ];
+}
+
+function readDateFromFile() {
+    try {
+        if (!fs.existsSync(DATE_FILE)) {
+            console.warn(`Date file ${DATE_FILE} not found. Using system date.`);
+            return new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        }
+        return fs.readFileSync(DATE_FILE, 'utf8').trim();
+    } catch (err) {
+        console.error('Error reading date file:', err);
+        return new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    }
+}
+
+function getGroupsForFile(filePath) {
+    const fileName = path.basename(filePath);
+    const groups = [];
+    for (const rule of GROUP_RULES) {
+        if (rule.fileNames && rule.fileNames.includes(fileName)) {
+            groups.push({ output: rule.output, files: rule.fileNames });
         }
     }
-    return next;
+    return groups;
 }
 
 
-function App() {
-    const [data, setData] = useState({});
-    const [lastUpdated, setlastUpdated] = useState({});
-    const [status, setStatus] = useState("disconnected");
-    const esRef = useRef(null);
-    const bufRef = useRef([]);
-    const flushTimerRef = useRef(null);
-    const reconnectTimerRef = useRef(null);
-    const retryRef = useRef(0);
-    const [childData, setChildData] = React.useState(null);
-    const [dateWiseData, setDateWiseData] = useState({})
-    const [loading, setLoading] = useState(false);
+async function trickleMerge(fileList, outputFile) {
+    const validFiles = fileList
+        .map(f => path.join(WATCH_DIR, f))
+        .filter(f => fs.existsSync(f));
 
-    const handleDataFromChild = (data) => {
-        setChildData(data);
-    };
-    const [mdata, setMData] = useState(null);
+    if (validFiles.length === 0) {
+        console.log(`No input files found for ${outputFile}.`);
+        return;
+    }
 
-    useEffect(() => {
+    const output = fs.createWriteStream(path.join(WATCH_DIR, outputFile));
 
-        const eventSource = new EventSource(`${UNIFIED_URL}/Mflags_d`);
+    const readers = validFiles.map(file => {
+        const stream = fs.createReadStream(file);
+        const rl = require('readline').createInterface({ input: stream, crlfDelay: Infinity });
+        return rl[Symbol.asyncIterator]();
+    });
 
-        eventSource.addEventListener('snapshot', (event) => {
-            const parsedData = JSON.parse(event.data);
-            setMData(parsedData);
-        });
+    let hasMoreLines = true;
+    try {
+        while (hasMoreLines) {
+            const linePromises = readers.map(iter => iter.next());
+            const results = await Promise.all(linePromises);
 
-        eventSource.addEventListener('delta', (event) => {
-            const parsedData = JSON.parse(event.data);
+            if (results.every(res => res.done)) break;
 
-            setMData((prevData) => {
-                if (!prevData || !prevData.payload) return prevData;
+            const processedLines = results.map((res, index) => {
+                if (res.done) return '';
 
-                const updatedPayload = { ...prevData.payload };
+                const line = res.value.trim();
+                if (!line) return '';
 
-                parsedData.payload.forEach((change) => {
-                    if (change.type === 'update' && change.key) {
-                        const newValue = change.changes?.[0]?.new;
-                        if (newValue !== undefined) {
-                            updatedPayload[change.key] = newValue;
-                        }
-                    }
-                });
+                if (index === 0) {
+                    return line;
+                } else {
 
-                return {
-                    ...prevData,
-                    last_updated_time: parsedData.last_updated_time,
-                    payload: updatedPayload
-                };
-            });
-        });
-
-        eventSource.onerror = (err) => console.error('SSE Error:', err);
-
-        return () => eventSource.close();
-    }, []);
-
-
-    const currentMFlagsDate = mdata?.payload?.MFLAGS_D || null;
-    const isMFlagsLoaded = currentMFlagsDate !== null;
-
-    useEffect(() => {
-        if (!isMFlagsLoaded || childData === null) {
-            console.log("MGLAG is not loaded yet waiting for it .....")
-            return;
-        }
-
-        if (childData === currentMFlagsDate) {
-            console.log("Selected date is TODAY");
-            return;
-        }
-
-        const controller = new AbortController();
-
-        const loadHistoricalData = async () => {
-            try {
-                const params = new URLSearchParams({
-                    date: String(childData)
-                });
-
-                console.log(
-                    "Loading historical data:",
-                    childData
-                );
-                setLoading(true)
-
-
-                const response = await fetch(
-                    `api/date_change?${params.toString()}`,
-                    {
-                        signal: controller.signal
-                    }
-                );
-
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}`);
+                    const parts = line.split(',');
+                    return parts.slice(1).join(',');
                 }
-
-                const json = await response.json();
-
-                console.log(
-                    "Historical data received:",
-                    childData
-                );
-                setLoading(false)
-                setDateWiseData(json);
-
-            } catch (error) {
-
-                if (error.name === "AbortError") {
-                    console.log(
-                        "Historical request cancelled:",
-                        childData
-                    );
-                    return;
-                }
-
-                console.error(
-                    "Historical data error:",
-                    error
-                );
-
-                setDateWiseData(null);
-            }
-        };
-
-        loadHistoricalData();
-
-        return () => {
-            controller.abort();
-        };
-
-    }, [
-        childData,
-        currentMFlagsDate,
-        isMFlagsLoaded
-    ]);
-
-    // mflag effect
-    useEffect(() => {
-
-        // MFLAGS has not arrived yet.
-        // DO NOTHING to the main SSE.
-        if (!isMFlagsLoaded) {
-            return;
-        }
-
-        if (childData === null) {
-            return;
-        }
-
-        const isToday =
-            childData === currentMFlagsDate;
-
-
-        if (isToday) {
-
-            console.log(
-                "MFLAGS loaded: selected date is TODAY."
-            );
-
-            return;
-        }
-
-
-        console.log(
-            "MFLAGS loaded: selected date is HISTORICAL.",
-            {
-                selected: childData,
-                current: currentMFlagsDate
-            }
-        );
-
-
-        // Historical date.
-        // Main SSE must not remain connected.
-        if (esRef.current) {
-
-            console.log(
-                "Closing MAIN SSE because selected date is historical."
-            );
-
-            esRef.current.close();
-
-            esRef.current = null;
-        }
-
-
-        if (reconnectTimerRef.current) {
-
-            clearTimeout(
-                reconnectTimerRef.current
-            );
-
-            reconnectTimerRef.current = null;
-        }
-
-
-        setStatus("disconnected");
-
-    }, [
-        isMFlagsLoaded,
-        currentMFlagsDate,
-        childData
-    ]);
-
-    useEffect(() => {
-        if (!isMFlagsLoaded) return;
-        if (childData === currentMFlagsDate) return;
-        if (childData === null) return;
-
-        if (dateWiseData?.sources) {
-            setData(dateWiseData.sources);
-        }
-    }, [dateWiseData, childData, currentMFlagsDate, isMFlagsLoaded]);
-
-
-    // main use effect
-
-
-    useEffect(() => {
-
-        if (childData === null) {
-            return;
-        }
-
-        console.log(
-            "Starting MAIN SSE for selected date:",
-            childData
-        );
-
-        let closed = false;
-
-        const flush = () => {
-
-            flushTimerRef.current = null;
-
-            const events = bufRef.current;
-            bufRef.current = [];
-
-            if (events.length === 0) {
-                return;
-            }
-
-            let initSources = null;
-            const perSource = new Map();
-            const stamps = {};
-
-            for (const { source, raw } of events) {
-
-                try {
-
-                    const msg = JSON.parse(raw);
-
-                    if (source === "__init") {
-
-                        initSources = msg.sources || {};
-
-                        if (msg.replicaMaxCounts) {
-
-                            initSources = {
-                                ...initSources,
-
-                                replicaMaxCounts: {
-                                    payload:
-                                        msg.replicaMaxCounts.payload,
-
-                                    last_updated_time:
-                                        msg.replicaMaxCounts.dateSuffix,
-                                }
-                            };
-                        }
-
-                        perSource.clear();
-
-                        for (
-                            const [s, v]
-                            of Object.entries(initSources)
-                        ) {
-
-                            if (v?.last_updated_time) {
-                                stamps[s] =
-                                    v.last_updated_time;
-                            }
-                        }
-
-                    } else if (
-                        msg.type === "snapshot" ||
-                        msg.type === "delta" ||
-                        msg.type === "replicaMaxCounts"
-                    ) {
-
-                        let list =
-                            perSource.get(source) || [];
-
-                        if (
-                            msg.type === "snapshot" ||
-                            msg.type === "replicaMaxCounts"
-                        ) {
-                            list = [];
-                        }
-
-                        list.push(msg);
-
-                        perSource.set(source, list);
-
-                        if (msg.last_updated_time) {
-                            stamps[source] =
-                                msg.last_updated_time;
-                        }
-                    }
-
-                } catch (err) {
-
-                    console.error(
-                        `Error parsing message for ${source}:`,
-                        err
-                    );
-                }
-            }
-
-            setData((prev) => {
-
-                const next = { ...prev };
-
-                if (initSources) {
-
-                    for (
-                        const [s, v]
-                        of Object.entries(initSources)
-                    ) {
-
-                        next[s] = v.payload;
-                    }
-                }
-
-                for (
-                    const [s, msgs]
-                    of perSource
-                ) {
-
-                    let cur = next[s];
-
-                    for (const msg of msgs) {
-
-                        if (
-                            msg.type === "snapshot" ||
-                            msg.type === "replicaMaxCounts"
-                        ) {
-
-                            cur = msg.payload;
-
-                        } else {
-
-                            const deltas =
-                                Array.isArray(msg.payload)
-                                    ? msg.payload
-                                    : [msg.payload];
-
-                            cur =
-                                applyDeltas(
-                                    cur,
-                                    deltas
-                                );
-                        }
-                    }
-
-                    next[s] = cur;
-                }
-
-                return next;
             });
 
-            if (Object.keys(stamps).length > 0) {
+            output.write(processedLines.join(',') + '\n');
+        }
+        output.end();
 
-                setlastUpdated((prev) => ({
-                    ...prev,
-                    ...stamps
-                }));
-            }
-        };
+        await finishedPromise(output);
+        // console.log(`[${new Date().toLocaleTimeString()}] Merged ${validFiles.length} files into ${outputFile}`);
+    } catch (err) {
+        console.error('Merge error:', err);
+        output.destroy(err);
+        throw err;
+    }
+}
 
+async function atmMerge(fileList, outputFile) {
+    const validFiles = fileList
+        .map(f => path.join(WATCH_DIR, f))
+        .filter(f => fs.existsSync(f));
 
-        const enqueue = (source, raw) => {
+    if (validFiles.length === 0) {
+        console.log(`No input files found for ${outputFile}.`);
+        return;
+    }
 
-            if (closed) {
-                return;
-            }
+    const outputPath = path.join(WATCH_DIR, outputFile);
+    const output = fs.createWriteStream(outputPath);
 
-            bufRef.current.push({
-                source,
-                raw
+    try {
+        for (const filePath of validFiles) {
+            // Get just the filename for the label
+            const fileName = path.basename(filePath);
+
+            // Write the filename label
+            output.write(`${fileName}\n`);
+
+            // Create stream and readline interface for the current file
+            const stream = fs.createReadStream(filePath);
+            const rl = require('readline').createInterface({
+                input: stream,
+                crlfDelay: Infinity
             });
 
-            if (
-                bufRef.current.length >=
-                MAX_BUFFER
-            ) {
-
-                if (flushTimerRef.current) {
-
-                    clearTimeout(
-                        flushTimerRef.current
-                    );
-
-                    flushTimerRef.current = null;
+            // Iterate through all lines of the current file
+            for await (const line of rl) {
+                const trimmedLine = line.trim();
+                // Optional: Skip empty lines if desired, currently writing all non-empty
+                if (trimmedLine) {
+                    output.write(`${trimmedLine}\n`);
                 }
-
-                flush();
-
-                return;
             }
 
-            if (!flushTimerRef.current) {
-
-                flushTimerRef.current =
-                    setTimeout(
-                        flush,
-                        FLUSH_MS
-                    );
-            }
-        };
-
-
-        const connect = () => {
-
-            if (closed) {
-                return;
-            }
-
-            console.log(
-                "Connecting MAIN SSE..."
-            );
-
-            setStatus("connecting");
-
-            const es =
-                new EventSource(
-                    UNIFIED_URL
-                );
-
-            esRef.current = es;
-
-
-            es.onopen = () => {
-
-                if (closed) {
-
-                    es.close();
-                    return;
-                }
-
-                retryRef.current = 0;
-
-                setStatus("connected");
-
-                console.log(
-                    "MAIN SSE connected."
-                );
-            };
-
-
-            es.onerror = () => {
-
-                es.close();
-
-                if (esRef.current === es) {
-
-                    esRef.current = null;
-                }
-
-                if (closed) {
-                    return;
-                }
-
-                setStatus("disconnected");
-
-                const timeout =
-                    Math.min(
-                        5000,
-                        1000 *
-                        (retryRef.current + 1)
-                    );
-
-                retryRef.current += 1;
-
-                reconnectTimerRef.current =
-                    setTimeout(() => {
-
-                        reconnectTimerRef.current =
-                            null;
-
-                        if (!closed) {
-                            connect();
-                        }
-
-                    }, timeout);
-            };
-
-
-            es.addEventListener(
-                "init",
-                (e) =>
-                    enqueue(
-                        "__init",
-                        e.data
-                    )
-            );
-
-
-            SOURCES.forEach((source) => {
-
-                es.addEventListener(
-                    source,
-                    (e) =>
-                        enqueue(
-                            source,
-                            e.data
-                        )
-                );
-
+            // Ensure stream is fully read before moving to next file
+            await new Promise((resolve) => {
+                if (stream.closed) resolve();
+                else stream.on('close', resolve);
             });
-        };
+        }
+
+        output.end();
+        await finishedPromise(output);
+        console.log(`[${new Date().toLocaleTimeString()}] Merged ${validFiles.length} files into ${outputFile}`);
+    } catch (err) {
+        console.error('Merge error:', err);
+        output.destroy(err);
+        throw err;
+    }
+}
+
+async function rtgsAckIncoming(fileList, outputFile) {
+    const allContents = [];
+    const outputPath = path.join(WATCH_DIR, outputFile);
+    try {
+        const results = await Promise.all(fileList.map(async (file) => {
+            const filePath = path.join(WATCH_DIR, file);
+            const content = await fsp.readFile(filePath, "utf8");
+            allContents.push(content.trim());
+        }))
+        const finalOutput = allContents.join(",");
+        await fsp.writeFile(outputPath, finalOutput, "utf8");
+    } catch (err) {
+        console.error('Merge error:', err);
+        throw err;
+    }
+}
 
 
-        connect();
+
+async function performGroupMerge(outputFile, inputFiles) {
+    if (inputFiles.size === 0) return;
+    const rule = GROUP_RULES.find(r => r.output === outputFile);
+    const mergeFn = (rule && MERGE_FUNCTIONS[rule.function]) || trickleMerge;
+    await mergeFn(Array.from(inputFiles), outputFile);
+}
+
+async function processQueue() {
+    if (pendingChanges.size === 0) return;
+    const promises = [];
+    for (const [outputFile, inputFiles] of pendingChanges.entries()) {
+        promises.push(performGroupMerge(outputFile, inputFiles));
+    }
+    pendingChanges.clear();
+    await Promise.all(promises);
+}
+
+function handleFileEvent(filePath) {
+    const fileName = path.basename(filePath);
+    if (fileName === path.basename(DATE_FILE)) return;
+
+    const groups = getGroupsForFile(filePath);
+    if (groups.length === 0) return;
+
+    groups.forEach(({ output, files }) => {
+        if (!pendingChanges.has(output)) pendingChanges.set(output, new Set(files));
+    });
+
+    clearTimeout(mergeTimeout);
+    mergeTimeout = setTimeout(() => processQueue().catch(console.error), DEBOUNCE_DELAY);
+}
+
+async function handleDateRollover() {
+    const newDate = readDateFromFile();
+    if (newDate !== CURRENT_DATE) {
+        console.log(`\n--- DATE ROLLOVER: ${CURRENT_DATE} -> ${newDate} ---`);
+        CURRENT_DATE = newDate;
+        GROUP_RULES = initializeGroupRules(CURRENT_DATE);
+        pendingChanges.clear();
+        clearTimeout(mergeTimeout);
+
+        for (const rule of GROUP_RULES) {
+            pendingChanges.set(rule.output, new Set(rule.fileNames));
+        }
+        await processQueue();
+    }
+}
+
+async function init() {
+    CURRENT_DATE = readDateFromFile();
+    GROUP_RULES = initializeGroupRules(CURRENT_DATE);
+
+    // Watcher configuration
+    watcher = chokidar.watch(WATCH_DIR, {
+        ignored: (filePath) => {
+            const name = path.basename(filePath);
+            return name.startsWith('.') && name !== path.basename(DATE_FILE);
+        },
+        persistent: true,
+        ignoreInitial: true,
+        awaitWriteFinish: { stabilityThreshold: 1000, pollInterval: 100 },
+        usePolling: false, // Set to true if watching network drives
+        interval: 100
+    });
+
+    watcher
+        .on('add', handleFileEvent)
+        .on('change', (filePath) => {
+            if (path.basename(filePath) === path.basename(DATE_FILE)) handleDateRollover();
+            else handleFileEvent(filePath);
+        })
+        .on('unlink', handleFileEvent)
+        .on('error', error => console.error('Watcher error:', error));
+
+    watcher.on('ready', async () => {
+        console.log('Initial scan complete. Triggering startup merge...');
+        for (const rule of GROUP_RULES) {
+            pendingChanges.set(rule.output, new Set(rule.fileNames));
+        }
+        await processQueue();
+        console.log('Startup merge complete. Now watching for changes... Press Ctrl+C to stop.');
+
+        if (process.stdin.isTTY) {
+            process.stdin.pause();
+        }
+    });
+}
 
 
-        return () => {
 
-            console.log(
-                "Cleaning up MAIN SSE because selected date changed."
-            );
+const MERGE_FUNCTIONS = {
+    trickleMerge,
+    mqStatusMerge,
+    atmMerge,
+    rtgsAckIncoming
+};
 
-            closed = true;
+async function pasteFilesHorizontally(fileList) {
+    const validFiles = fileList
+        .map(f => path.join(WATCH_DIR, f))
+        .filter(f => fs.existsSync(f));
 
-            if (esRef.current) {
+    if (validFiles.length === 0) return [];
 
-                esRef.current.close();
+    const readers = validFiles.map(file => {
+        const stream = fs.createReadStream(file);
+        const rl = require('readline').createInterface({ input: stream, crlfDelay: Infinity });
+        return rl[Symbol.asyncIterator]();
+    });
 
-                esRef.current = null;
-            }
+    const lines = [];
+    while (true) {
+        const results = await Promise.all(readers.map(iter => iter.next()));
+        if (results.every(res => res.done)) break;
+        lines.push(results.map(res => (res.done ? '' : res.value.trim())).join(','));
+    }
+    return lines;
+}
 
-            if (reconnectTimerRef.current) {
+async function mqStatusMerge(_fileList, outputFile = MQ_STATUS_OUTPUT) {
+    const groupLineSets = [];
+    for (const group of MQ_STATUS_GROUPS) {
+        groupLineSets.push(await pasteFilesHorizontally(group));
+    }
 
-                clearTimeout(
-                    reconnectTimerRef.current
-                );
+    if (groupLineSets.every(lines => lines.length === 0)) {
+        console.log(`No input files found for ${outputFile}.`);
+        return;
+    }
 
-                reconnectTimerRef.current = null;
-            }
+    const output = fs.createWriteStream(path.join(WATCH_DIR, outputFile));
+    try {
+        for (const lines of groupLineSets) {          // stack the groups vertically
+            for (const line of lines) output.write(line + '\n');
+        }
+        output.end();
+        await finishedPromise(output);
+        // console.log(`[${new Date().toLocaleTimeString()}] Merged 3 MQ status groups into ${outputFile}`);
+    } catch (err) {
+        console.error('MQ status merge error:', err);
+        output.destroy(err);
+        throw err;
+    }
+}
 
-            if (flushTimerRef.current) {
+module.exports = { init };
 
-                clearTimeout(
-                    flushTimerRef.current
-                );
 
-                flushTimerRef.current = null;
-            }
 
-            bufRef.current = [];
 
-            retryRef.current = 0;
 
-        };
 
-    }, [
-        childData
-    ]);
+
+
+
+
+
+group going to add:
+[
+        {
+            fileNames: [
+                `gateway_i.txt.${date}`, `gateway_I.txt.${date}`,
+                `gateway_a.txt.${date}`, `gateway_b.txt.${date}`, `gateway_c.txt.${date}`,
+                `gateway_d.txt.${date}`, `gateway_e.txt.${date}`, `gateway_f.txt.${date}`,
+                `gateway_g.txt.${date}`, `gateway_h.txt.${date}`, `gateway_j.txt.${date}`,
+                `gateway_k.txt.${date}`, `gateway_m.txt.${date}`, `gateway_n.txt.${date}`,
+                `gateway_p.txt.${date}`, `gateway_q.txt.${date}`
+            ],
+            output: `gateway.txt_8app.${date}`,
+
+        },
+        {
+            fileNames: [`queue_buildup_i.txt.${date}`, `queue_buildup_I.txt.${date}`, `queue_buildup_a.txt.${date}`, `queue_buildup_b.txt.${date}`, `queue_buildup_c.txt.${date}`, `queue_buildup_d.txt.${date}`, `queue_buildup_e.txt.${date}`, `queue_buildup_f.txt.${date}`, `queue_buildup_g.txt.${date}`, `queue_buildup_h.txt.${date}`, `queue_buildup_j.txt.${date}`, `queue_buildup_k.txt.${date}`, `queue_buildup_m.txt.${date}`, `queue_buildup_n.txt.${date}`, `queue_buildup_p.txt.${date}`, `queue_buildup_q.txt.${date}`],
+            output: `status_queue_8app.txt.${date}`,
+
+        },
+        {
+            fileNames: [`top_m.txt.${date}`, `top_s1.txt.${date}`, `top_s2.txt.${date}`, `top_s3.txt.${date}`, `top_s4.txt.${date}`, `top_s5.txt.${date}`, `top_s6.txt.${date}`, `top_s7.txt.${date}`, `top_s8.txt.${date}`],
+            output: `top_8apps.txt_1.${date}`,
+            isVertical: false,
+            useCat: false
+        },
+        {
+            fileNames: [`topstat_m.txt.${date}`, `topstat_s1.txt.${date}`, `topstat_s2.txt.${date}`, `topstat_s3.txt.${date}`, `topstat_s4.txt.${date}`, `topstat_s5.txt.${date}`, `topstat_s6.txt.${date}`, `topstat_s7.txt.${date}`, `topstat_s8.txt.${date}`, `topstat_s9.txt.${date}`, `topstat_s10.txt.${date}`, `topstat_s11.txt.${date}`, `topstat_s12.txt.${date}`, `topstat_s13.txt.${date}`, `topstat_s14.txt.${date}`, `topstat_s15.txt.${date}`],
+            output: `topstat_8apps.txt.${date}`,
+
+        },
+        {
+            fileNames: [`space_m.txt.${date}`, `space_s1.txt.${date}`, `space_s2.txt.${date}`, `space_s3.txt.${date}`, `space_s4.txt.${date}`, `space_s5.txt.${date}`, `space_s6.txt.${date}`, `space_s7.txt.${date}`, `space_s8.txt.${date}`, `space_s9.txt.${date}`, `space_s10.txt.${date}`, `space_s11.txt.${date}`, `space_s12.txt.${date}`, `space_s13.txt.${date}`, `space_s14.txt.${date}`, `space_s15.txt.${date}`],
+            output: `space_8apps.txt.${date}`,
+
+        },
+        {
+            fileNames: [`path_for_bu_files`, `bu_arka_i.txt.${date}`, `bu_arka_I.txt.${date}`, `bu_arka_a.txt.${date}`, `bu_arka_b.txt.${date}`, `bu_arka_c.txt.${date}`, `bu_arka_d.txt.${date}`, `bu_arka_e.txt.${date}`, `bu_arka_f.txt.${date}`, `bu_arka_g.txt.${date}`],
+            output: `bu_arka.txt.${date}`,
+
+        },
+        {
+            fileNames: [`ocr_neft_m.txt.${date}`, `neft_s1.txt.${date}`, `neft_s2.txt.${date}`, `neft_s3.txt.${date}`, `neft_s4.txt.${date}`, `neft_s5.txt.${date}`, `neft_s6.txt.${date}`, `neft_s7.txt.${date}`, `neft_s8.txt.${date}`, `neft_s9.txt.${date}`, `neft_s10.txt.${date}`, `neft_s11.txt.${date}`, `neft_s12.txt.${date}`, `neft_s13.txt.${date}`, `neft_s14.txt.${date}`, `neft_s15.txt.${date}`],
+            output: `ocr_neft_8apps.txt.${date}`,
+
+        },
+        {
+            fileNames: [`rtgs_incoming_rbi_flag_i.txt.${date}`, `rtgs_incoming_rbi_flag_I.txt.${date}`, `rtgs_incoming_rbi_flag_a.txt.${date}`, `rtgs_incoming_rbi_flag_b.txt.${date}`, `rtgs_incoming_rbi_flag_c.txt.${date}`, `rtgs_incoming_rbi_flag_d.txt.${date}`, `rtgs_incoming_rbi_flag_e.txt.${date}`, `rtgs_incoming_rbi_flag_f.txt.${date}`, `rtgs_incoming_rbi_flag_g.txt.${date}`, `rtgs_incoming_rbi_flag_h.txt.${date}`, `rtgs_incoming_rbi_flag_j.txt.${date}`, `rtgs_incoming_rbi_flag_k.txt.${date}`, `rtgs_incoming_rbi_flag_m.txt.${date}`, `rtgs_incoming_rbi_flag_n.txt.${date}`, `rtgs_incoming_rbi_flag_p.txt.${date}`, `rtgs_incoming_rbi_flag_q.txt.${date}`],
+            output: `rtgs_incoming_rbi_12apps.txt.${date}`,
+
+        },
+        {
+            fileNames: [`rtgs_outgoing_psg_i.txt.${date}`, `rtgs_outgoing_psg_I.txt.${date}`, `rtgs_outgoing_psg_a.txt.${date}`, `rtgs_outgoing_psg_b.txt.${date}`, `rtgs_outgoing_psg_c.txt.${date}`, `rtgs_outgoing_psg_d.txt.${date}`, `rtgs_outgoing_psg_e.txt.${date}`, `rtgs_outgoing_psg_f.txt.${date}`, `rtgs_outgoing_psg_g.txt.${date}`, `rtgs_outgoing_psg_h.txt.${date}`, `rtgs_outgoing_psg_j.txt.${date}`, `rtgs_outgoing_psg_k.txt.${date}`, `rtgs_outgoing_psg_m.txt.${date}`, `rtgs_outgoing_psg_n.txt.${date}`, `rtgs_outgoing_psg_p.txt.${date}`, `rtgs_outgoing_psg_q.txt.${date}`],
+            output: `rtgs_outgoing_psg_12apps.txt.${date}`,
+
+        },
+        {
+            fileNames: [
+                `rtgsng_ack_in_i.txt.${date}`, `rtgsng_ack_in_I.txt.${date}`,
+                `rtgsng_ack_in_a.txt.${date}`, `rtgsng_ack_in_b.txt.${date}`, `rtgsng_ack_in_c.txt.${date}`,
+                `rtgsng_ack_in_d.txt.${date}`, `rtgsng_ack_in_e.txt.${date}`, `rtgsng_ack_in_f.txt.${date}`,
+                `rtgsng_ack_in_g.txt.${date}`, `rtgsng_ack_in_h.txt.${date}`, `rtgsng_ack_in_j.txt.${date}`,
+                `rtgsng_ack_in_k.txt.${date}`, `rtgsng_ack_in_m.txt.${date}`, `rtgsng_ack_in_n.txt.${date}`,
+                `rtgsng_ack_in_p.txt.${date}`, `rtgsng_ack_in_q.txt.${date}`
+            ],
+            output: `rtgsng_ack_in_12apps.txt.${date}`,
+
+        },
+        {
+            fileNames: [
+                `rtgsngingateway_i.txt.${date}`, `rtgsngingateway_I.txt.${date}`,
+                `rtgsngingateway_a.txt.${date}`, `rtgsngingateway_b.txt.${date}`, `rtgsngingateway_c.txt.${date}`,
+                `rtgsngingateway_d.txt.${date}`, `rtgsngingateway_e.txt.${date}`, `rtgsngingateway_f.txt.${date}`,
+                `rtgsngingateway_g.txt.${date}`, `rtgsngingateway_h.txt.${date}`, `rtgsngingateway_j.txt.${date}`,
+                `rtgsngingateway_k.txt.${date}`, `rtgsngingateway_m.txt.${date}`, `rtgsngingateway_n.txt.${date}`,
+                `rtgsngingateway_p.txt.${date}`, `rtgsngingateway_q.txt.${date}`
+            ],
+            output: `rtgsngingateway_12apps.txt.${date}`,
+
+        }
+    ];
