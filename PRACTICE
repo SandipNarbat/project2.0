@@ -1,51 +1,198 @@
-const watchdog = setInterval(() => {
+"""
+Unsupervised Email Intent Detection
+====================================
+Discovers "intent" clusters in a set of emails WITHOUT any labeled data.
 
-    if (closed) return;
+Pipeline:
+    1. Load + clean raw emails from a .txt file
+    2. Embed each email semantically (Sentence-BERT)
+    3. Reduce dimensionality (UMAP) — makes density-based clustering work well
+    4. Cluster (HDBSCAN) — finds the number of intents automatically, no k needed
+    5. Auto-label each cluster with its top distinguishing keywords (c-TF-IDF),
+       so you get a human-readable "intent name" for free
 
-    const elapsed =
-        Date.now() - lastSSEMessageRef.current;
+Install:
+    pip install sentence-transformers umap-learn hdbscan scikit-learn pandas numpy
 
-    if (elapsed > 20000) {
+Usage:
+    python train_intent_model.py --input emails.txt --output_dir intent_model
+"""
 
-        console.warn(
-            "SSE watchdog: backend connection lost"
-        );
-
-        setStatus("disconnected");
-
-        if (esRef.current) {
-            esRef.current.close();
-            esRef.current = null;
-        }
-
-        if (!reconnectTimerRef.current) {
-
-            reconnectTimerRef.current = setTimeout(() => {
-
-                reconnectTimerRef.current = null;
-
-                if (!closed) {
-                    connect();
-                }
-
-            }, 1000);
-        }
-    }
-
-}, 5000);
+import argparse
+import os
+import re
+import pickle
+import numpy as np
+import pandas as pd
+from sklearn.feature_extraction.text import CountVectorizer
+import hdbscan
+import umap
+from sentence_transformers import SentenceTransformer
 
 
+# ---------------------------------------------------------------------------
+# 1. Load & clean
+# ---------------------------------------------------------------------------
 
-return () => {
+def load_emails(path: str, delimiter: str = "\n---\n") -> list:
+    """
+    Load emails from a txt file.
+    Assumes emails are separated by `delimiter` (default: a line containing '---').
+    If your file has one email per line instead, pass delimiter="\n".
+    """
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        raw = f.read()
+    emails = [e.strip() for e in raw.split(delimiter) if e.strip()]
+    return emails
 
-    closed = true;
 
-    clearInterval(watchdog);
+def clean_text(text: str) -> str:
+    """Strip headers, URLs, emails, and extra whitespace so embeddings focus on content."""
+    text = re.sub(r"^(From|To|Subject|Date|Cc|Bcc):.*$", "", text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r"http\S+", " ", text)
+    text = re.sub(r"\S+@\S+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
-    // your existing cleanup...
 
-};
+# ---------------------------------------------------------------------------
+# 2. Embed
+# ---------------------------------------------------------------------------
+
+def embed_emails(texts: list, model_name: str = "all-MiniLM-L6-v2"):
+    """Semantic embeddings capture *meaning*, so 'please refund my order' and
+    'I want my money back' land near each other even with zero shared keywords."""
+    model = SentenceTransformer(model_name)
+    embeddings = model.encode(texts, show_progress_bar=True, normalize_embeddings=True)
+    return embeddings, model
 
 
+# ---------------------------------------------------------------------------
+# 3. Reduce dimensions
+# ---------------------------------------------------------------------------
+
+def reduce_dimensions(embeddings: np.ndarray, n_components: int = 5, random_state: int = 42):
+    reducer = umap.UMAP(
+        n_neighbors=15,
+        n_components=n_components,
+        min_dist=0.0,
+        metric="cosine",
+        random_state=random_state,
+    )
+    reduced = reducer.fit_transform(embeddings)
+    return reduced, reducer
 
 
+# ---------------------------------------------------------------------------
+# 4. Cluster
+# ---------------------------------------------------------------------------
+
+def cluster_emails(reduced_embeddings: np.ndarray, min_cluster_size: int = 5):
+    """HDBSCAN picks the number of clusters itself and labels genuine outliers
+    as -1 (noise) instead of forcing every email into a group."""
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        metric="euclidean",
+        cluster_selection_method="eom",
+        prediction_data=True,  # required so we can predict on new emails later
+    )
+    labels = clusterer.fit_predict(reduced_embeddings)
+    return labels, clusterer
+
+
+# ---------------------------------------------------------------------------
+# 5. Auto-label clusters (c-TF-IDF)
+# ---------------------------------------------------------------------------
+
+def label_clusters(texts: list, labels: np.ndarray, top_n: int = 8) -> dict:
+    """
+    Treat each cluster as one big "document" and run a class-based TF-IDF:
+    terms frequent inside a cluster but rare across other clusters become
+    that cluster's intent keywords (this is the trick BERTopic uses).
+    """
+    df = pd.DataFrame({"text": texts, "cluster": labels})
+    df = df[df.cluster != -1]  # drop noise points
+    grouped = df.groupby("cluster")["text"].apply(lambda x: " ".join(x))
+
+    vectorizer = CountVectorizer(stop_words="english", max_features=5000)
+    count_matrix = vectorizer.fit_transform(grouped.values)
+    terms = np.array(vectorizer.get_feature_names_out())
+
+    tf = count_matrix.toarray()
+    tf_norm = tf / tf.sum(axis=1, keepdims=True)
+    idf = np.log(1 + (tf.shape[0] / (1 + (tf > 0).sum(axis=0))))
+    ctfidf = tf_norm * idf
+
+    cluster_keywords = {}
+    for i, cluster_id in enumerate(grouped.index):
+        top_idx = ctfidf[i].argsort()[::-1][:top_n]
+        cluster_keywords[int(cluster_id)] = terms[top_idx].tolist()
+
+    return cluster_keywords
+
+
+# ---------------------------------------------------------------------------
+# Train
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True, help="Path to txt file with emails")
+    parser.add_argument("--output_dir", default="intent_model", help="Where to save the trained model")
+    parser.add_argument("--delimiter", default="\n---\n", help="Delimiter separating emails in the file")
+    parser.add_argument("--min_cluster_size", type=int, default=5, help="Min emails to form an intent cluster")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    print(f"Loading emails from {args.input} ...")
+    raw_emails = load_emails(args.input, args.delimiter)
+    print(f"Loaded {len(raw_emails)} emails")
+    if len(raw_emails) < 20:
+        print("Warning: clustering is unreliable with very few emails (<20). Results may be noisy.")
+
+    cleaned = [clean_text(e) for e in raw_emails]
+
+    print("Generating sentence embeddings ...")
+    embeddings, embedder = embed_emails(cleaned)
+
+    print("Reducing dimensionality with UMAP ...")
+    reduced, reducer = reduce_dimensions(embeddings)
+
+    print("Clustering with HDBSCAN ...")
+    labels, clusterer = cluster_emails(reduced, args.min_cluster_size)
+
+    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+    n_noise = int((labels == -1).sum())
+    print(f"Discovered {n_clusters} intent clusters ({n_noise} emails unassigned as noise)")
+
+    print("Extracting intent keywords per cluster ...")
+    cluster_keywords = label_clusters(cleaned, labels)
+    for cid, kws in cluster_keywords.items():
+        print(f"  Cluster {cid}: {', '.join(kws)}")
+
+    results = pd.DataFrame({
+        "email": raw_emails,
+        "cluster": labels,
+        "intent_keywords": [
+            ", ".join(cluster_keywords.get(l, ["noise/unassigned"])) for l in labels
+        ],
+    })
+    out_csv = os.path.join(args.output_dir, "emails_with_intent.csv")
+    results.to_csv(out_csv, index=False)
+
+    out_pkl = os.path.join(args.output_dir, "intent_model.pkl")
+    with open(out_pkl, "wb") as f:
+        pickle.dump({
+            "embedder_name": "all-MiniLM-L6-v2",
+            "umap_reducer": reducer,
+            "hdbscan_clusterer": clusterer,
+            "cluster_keywords": cluster_keywords,
+        }, f)
+
+    print(f"\nSaved labeled emails -> {out_csv}")
+    print(f"Saved model artifacts -> {out_pkl}")
+
+
+if __name__ == "__main__":
+    main()
