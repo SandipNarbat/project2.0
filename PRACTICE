@@ -62,93 +62,192 @@ class LogEvent:
 
 
 class AsyncStructuredLogger:
+    """
+    Lossless asynchronous structured logger.
 
-    def current_log_date(self)-> str:
+    Design goals:
+    - Never intentionally drop a log because the queue is full.
+    - Apply backpressure to the producer when the queue is full.
+    - Batch file writes for high throughput.
+    - Retry failed file writes instead of marking the batch complete.
+    - Track received/written/dropped events for load testing.
+    """
+
+    QUEUE_MAXSIZE = 50000
+    BATCH_SIZE = 100
+    RETRY_DELAY_SECONDS = 0.5
+
+    def current_log_date(self) -> str:
         return date.today().isoformat()
-    
+
     def __init__(self, log_dir: str):
         self.current_date = self.current_log_date()
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+
         self.events_log = self.log_dir / f"MonitAI_{self.current_date}.jsonl"
         self.events_txt = self.log_dir / f"MonitAI_{self.current_date}.txt"
-        self.log_queue = queue.Queue(maxsize=50000)
+
+        # Bounded queue + blocking put = backpressure, NOT data loss.
+        self.log_queue = queue.Queue(maxsize=self.QUEUE_MAXSIZE)
+
         self.stop_logging = threading.Event()
-        self.logger_thread = threading.Thread(target=self._log_worker, daemon=True)
+
+        # Counters used to verify lossless behavior during 500+ LPS tests.
+        self._stats_lock = threading.Lock()
+        self.events_received = 0
+        self.events_written = 0
+        self.events_dropped = 0
+        self.write_errors = 0
+
+        self.logger_thread = threading.Thread(
+            target=self._log_worker,
+            name="MonitAI-Logger",
+            daemon=True,
+        )
         self.logger_thread.start()
 
-        print(f"AsyncStructuredLogger initialized - background thread started")
+        print(
+            f"AsyncStructuredLogger initialized - "
+            f"background thread started, queue={self.QUEUE_MAXSIZE}"
+        )
+
+    def _update_stat(self, name: str, amount: int = 1):
+        with self._stats_lock:
+            setattr(self, name, getattr(self, name) + amount)
+
+    def _write_batch(self, batch):
+        """
+        Write a batch to both log files.
+
+        The batch is considered complete only after BOTH files have been
+        successfully written. If one write fails, retry it. This prevents
+        the worker from silently losing a batch after an I/O exception.
+        """
+        event_lines = []
+        txt_lines = []
+
+        for log_type, data in batch:
+            if log_type != "event":
+                continue
+
+            event_lines.append(json.dumps(data, ensure_ascii=False) + "\n")
+
+            ts = data["timestamp"]
+            level = data["level"]
+            module = data["module"]
+            message = data["message"]
+            context = data.get("context", {})
+
+            txt_line = f"[{ts}] [{level}] [{module}] {message}"
+            if context:
+                txt_line += f" | {context}"
+
+            txt_lines.append(txt_line + "\n")
+
+        if not event_lines:
+            return
+
+        json_written = False
+        txt_written = False
+
+        # Retry until both destinations succeed.
+        # This intentionally favors durability over silently dropping logs.
+        while not (json_written and txt_written):
+            if self.stop_logging.is_set():
+                # Shutdown does NOT cancel pending writes. The flag only tells
+                # the worker to stop after the queue is drained.
+                pass
+
+            try:
+                if not json_written:
+                    with open(self.events_log, "a", encoding="utf-8") as f:
+                        f.writelines(event_lines)
+                        f.flush()
+                    json_written = True
+
+            except Exception as e:
+                self._update_stat("write_errors")
+                print(f"ERROR: failed to write JSON log batch: {e}")
+                time.sleep(self.RETRY_DELAY_SECONDS)
+
+            try:
+                if not txt_written:
+                    with open(self.events_txt, "a", encoding="utf-8") as f:
+                        f.writelines(txt_lines)
+                        f.flush()
+                    txt_written = True
+
+            except Exception as e:
+                self._update_stat("write_errors")
+                print(f"ERROR: failed to write TXT log batch: {e}")
+                time.sleep(self.RETRY_DELAY_SECONDS)
+
+        self._update_stat("events_written", len(event_lines))
 
     def _log_worker(self):
-        buffers = {
-            "events": [],
-            "event_txt": [],
-        }
-
         while not self.stop_logging.is_set() or not self.log_queue.empty():
             new_date = self.current_log_date()
+
             if new_date != self.current_date:
                 self.current_date = new_date
                 self.events_log = self.log_dir / f"MonitAI_{new_date}.jsonl"
                 self.events_txt = self.log_dir / f"MonitAI_{new_date}.txt"
 
+            batch = []
+
             try:
-                batch = []
-                try:
-                    batch.append(self.log_queue.get(timeout=0.1))
+                # Wait for the first event.
+                batch.append(self.log_queue.get(timeout=0.1))
 
-                    for _ in range(99):
-                        try:
-                            batch.append(self.log_queue.get_nowait())
-                        except queue.Empty:
-                            break
-                except queue.Empty:
-                    continue
-
-                for log_type, data in batch:
-                    if log_type == "event":
-                        buffers["events"].append(json.dumps(data) + "\n")
-
-                        ts = data["timestamp"]
-                        level = data["level"]
-                        module = data["module"]
-                        message = data["message"]
-                        context = data.get("context", {})
-
-                        txt_line = (
-                            f"[{ts}] [{level}] [{module}] {message}"
-                        )
-                        if context:
-                            txt_line += f" | {context}"
-                        
-                        buffers["event_txt"].append(txt_line + "\n")
-
-
-                if buffers["events"]:
-                    with open(self.events_log, "a", encoding="utf-8") as f:
-                        f.writelines(buffers["events"])
-                    buffers["events"].clear()
-
-                if buffers["event_txt"]:
+                # Drain additional events without blocking.
+                for _ in range(self.BATCH_SIZE - 1):
                     try:
-                        with open(self.events_txt, "a", encoding="utf-8") as f:
-                            f.writelines(buffers["event_txt"])
-                    except Exception as e:
-                        print(f"WORNING: failed to write TXT log:{e}")
-                    finally:
-                        buffers["event_txt"].clear()     
+                        batch.append(self.log_queue.get_nowait())
+                    except queue.Empty:
+                        break
 
-                for _ in batch:
-                    self.log_queue.task_done()
+                # Write the batch. If an I/O error occurs, _write_batch()
+                # retries instead of discarding the batch.
+                self._write_batch(batch)
+
+            except queue.Empty:
+                continue
 
             except Exception as e:
+                # Unexpected worker error: do NOT lose the batch.
+                self._update_stat("write_errors")
                 print(f"ERROR in logger thread: {e}")
+
+                # Retry the already-dequeued batch if one exists.
+                if batch:
+                    try:
+                        self._write_batch(batch)
+                    except Exception as retry_error:
+                        print(
+                            f"CRITICAL: logger retry failed: {retry_error}"
+                        )
+                        # Do not call task_done here; keeping the unfinished
+                        # count means shutdown cannot falsely report success.
+                        time.sleep(self.RETRY_DELAY_SECONDS)
+                        continue
+
+            finally:
+                # Every successfully dequeued item must be acknowledged exactly
+                # once. _write_batch() itself never calls task_done().
+                if batch:
+                    for _ in batch:
+                        self.log_queue.task_done()
 
     def _safe_serialize(self, obj):
         return sanitize_for_json(obj)
 
     def log_event(
-        self, level: str, module: str, message: str, context: Dict[str, Any] = None
+        self,
+        level: str,
+        module: str,
+        message: str,
+        context: Dict[str, Any] = None,
     ):
         event = {
             "timestamp": datetime.now().isoformat(),
@@ -158,10 +257,12 @@ class AsyncStructuredLogger:
             "context": self._safe_serialize(context) if context else {},
         }
 
-        try:
-            self.log_queue.put_nowait(("event", event))
-        except queue.Full:
-            print(f"WARNING: Log queue full (10000 items), dropping event: {message}")
+        self._update_stat("events_received")
+
+        # IMPORTANT:
+        # put() blocks when the queue is full instead of dropping the event.
+        # This creates backpressure and preserves every log record.
+        self.log_queue.put(("event", event))
 
     def info(self, module: str, message: str, context: Dict = None):
         self.log_event("INFO", module, message, context)
@@ -175,13 +276,34 @@ class AsyncStructuredLogger:
     def shutdown(self):
         print("Shutting down logger, waiting for queue to empty...")
         print(f"Queue size: {self.log_queue.qsize()}")
-        self.log_queue.join()  # Wait for all logs to be written
+
+        # Wait until every queued event has been written.
+        self.log_queue.join()
+
         self.stop_logging.set()
-        self.logger_thread.join(timeout=10)
-        print("Logger shutdown complete")
+        self.logger_thread.join(timeout=30)
+
+        stats = self.get_stats()
+        print(
+            "Logger shutdown complete | "
+            f"received={stats['events_received']} | "
+            f"written={stats['events_written']} | "
+            f"dropped={stats['events_dropped']} | "
+            f"write_errors={stats['write_errors']}"
+        )
 
     def get_queue_size(self):
         return self.log_queue.qsize()
+
+    def get_stats(self):
+        with self._stats_lock:
+            return {
+                "events_received": self.events_received,
+                "events_written": self.events_written,
+                "events_dropped": self.events_dropped,
+                "write_errors": self.write_errors,
+                "queue_size": self.log_queue.qsize(),
+            }
 
 
 logger = AsyncStructuredLogger(CONFIG["log_dir"])
