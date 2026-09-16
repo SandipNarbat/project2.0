@@ -1,167 +1,414 @@
-from __future__ import annotations
-import argparse
-import re
-import sys
-import time
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Optional, Sequence
+from datetime import date, datetime
+import json
+import threading
+import time
+from typing import Dict, Any, Optional, Tuple
+from dataclasses import dataclass, asdict
+import numpy as np
+import concurrent.futures
+import queue
+from collections import defaultdict
 
-_TIMESTAMP_RE = re.compile(r"\[(\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\]")
-_TS_FMT = "%m/%d/%Y %H:%M:%S"
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
+CONFIG = {
+    "log_dir": "logs",
+    "alert_on_baseline_exceeded": True,
+    "alert_cooldown_seconds": 300,
+}
 
-@dataclass(frozen=True)
-class LogEntry:
-    """Represents one logical Autosys log entry."""
-
-    timestamp: Optional[datetime]
-    text: str
-
-
-def _split_line_into_entries(line: str) -> Sequence[LogEntry]:
-    """Split a physical line into logical entries if it embeds multiple timestamps."""
-
-    matches = list(_TIMESTAMP_RE.finditer(line))
-    if not matches:
-        return (LogEntry(timestamp=None, text=line.strip()),)
-
-    entries: list[LogEntry] = []
-    for idx, match in enumerate(matches):
-        ts = datetime.strptime(match.group(1), _TS_FMT)
-        start = match.start()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(line)
-        chunk = line[start:end].strip()
-        entries.append(LogEntry(timestamp=ts, text=chunk))
-    return entries
+# ============================================================================
+# UTILITIES - JSON SERIALIZATION FIX
+# ============================================================================
 
 
-def _iter_entries(path: Path) -> Iterator[LogEntry]:
-    with path.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            stripped = raw_line.rstrip("\n")
-            if not stripped:
-                continue
-            yield from _split_line_into_entries(stripped)
+def sanitize_for_json(obj):
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [sanitize_for_json(item) for item in obj]
+    elif isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, set):
+        return list(obj)
+    else:
+        return obj
 
 
-class AutosysLogStreamer:
-    """Streams historic Autosys logs as if they were emitted live."""
+# ============================================================================
+# LOGGING - ✅ FIXED: JSON SERIALIZATION
+# ============================================================================
 
-    def __init__(
-        self,
-        log_path: Path,
-        *,
-        speed: float = 1.0,
-        since: Optional[datetime] = None,
-        until: Optional[datetime] = None,
-        loop: bool = False,
-        sleeper: Callable[[float], None] = time.sleep,
-    ) -> None:
-        if speed <= 0:
-            raise ValueError("speed must be > 0")
-        self.log_path = log_path
-        self.speed = speed
-        self.since = since
-        self.until = until
-        self.loop = loop
-        self._sleep = sleeper
 
-    def _should_emit(self, entry: LogEntry) -> bool:
-        ts = entry.timestamp
-        if ts is None:
-            return True
-        if self.since and ts < self.since:
-            return False
-        if self.until and ts > self.until:
-            return False
-        return True
+@dataclass
+class LogEvent:
+    timestamp: str
+    level: str
+    module: str
+    message: str
+    context: Dict[str, Any] = None
 
-    def _compute_wait(self, prev_ts: Optional[datetime], current_ts: Optional[datetime]) -> float:
-        if prev_ts is None or current_ts is None:
-            return 0.0
-        delta = (current_ts - prev_ts).total_seconds()
-        if delta <= 0:
-            return 0.0
-        return delta / self.speed
+    def to_dict(self):
+        return asdict(self)
 
-    def stream(self, emit: Callable[[str], None] = None) -> None:
-        """Replay the log file honoring the original inter-entry timing."""
 
-        sink = emit or (lambda text: sys.stdout.write(text + "\n"))
+class AsyncStructuredLogger:
 
-        while True:
-            previous_ts: Optional[datetime] = None
-            emitted_any = False
-            for entry in _iter_entries(self.log_path):
-                if not self._should_emit(entry):
-                    if entry.timestamp and self.until and entry.timestamp > self.until:
-                        # No need to continue scanning - future entries will only be later.
-                        return
+    def current_log_date(self)-> str:
+        return date.today().isoformat()
+    
+    def __init__(self, log_dir: str):
+        self.current_date = self.current_log_date()
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.events_log = self.log_dir / f"MonitAI_{self.current_date}.jsonl"
+        self.events_txt = self.log_dir / f"MonitAI_{self.current_date}.txt"
+        self.log_queue = queue.Queue(maxsize=50000)
+        self.stop_logging = threading.Event()
+        self.logger_thread = threading.Thread(target=self._log_worker, daemon=True)
+        self.logger_thread.start()
+
+        print(f"AsyncStructuredLogger initialized - background thread started")
+
+    def _log_worker(self):
+        buffers = {
+            "events": [],
+            "event_txt": [],
+        }
+
+        while not self.stop_logging.is_set() or not self.log_queue.empty():
+            new_date = self.current_log_date()
+            if new_date != self.current_date:
+                self.current_date = new_date
+                self.events_log = self.log_dir / f"MonitAI_{new_date}.jsonl"
+                self.events_txt = self.log_dir / f"MonitAI_{new_date}.txt"
+
+            try:
+                batch = []
+                try:
+                    batch.append(self.log_queue.get(timeout=0.1))
+
+                    for _ in range(99):
+                        try:
+                            batch.append(self.log_queue.get_nowait())
+                        except queue.Empty:
+                            break
+                except queue.Empty:
                     continue
 
-                wait_seconds = self._compute_wait(previous_ts, entry.timestamp)
-                if wait_seconds:
-                    self._sleep(wait_seconds)
-                self.current_sim_time = entry.timestamp
-                sink(entry.text)
-                emitted_any = True
-                previous_ts = entry.timestamp or previous_ts
+                for log_type, data in batch:
+                    if log_type == "event":
+                        buffers["events"].append(json.dumps(data) + "\n")
 
-            if not self.loop or not emitted_any:
-                break
+                        ts = data["timestamp"]
+                        level = data["level"]
+                        module = data["module"]
+                        message = data["message"]
+                        context = data.get("context", {})
+
+                        txt_line = (
+                            f"[{ts}] [{level}] [{module}] {message}"
+                        )
+                        if context:
+                            txt_line += f" | {context}"
+                        
+                        buffers["event_txt"].append(txt_line + "\n")
 
 
-def _parse_dt(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    return datetime.strptime(value, _TS_FMT)
+                if buffers["events"]:
+                    with open(self.events_log, "a", encoding="utf-8") as f:
+                        f.writelines(buffers["events"])
+                    buffers["events"].clear()
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Replay Autosys logs with their original timing offsets.",
-    )
-    parser.add_argument(
-        "--log-file",
-        default="D:\AUTOSYSLOG\event_demon.SBI.09012025.txt",
-        type=Path,
-    )
-    parser.add_argument(
-        "--speed",
-        default=1.0,
-        type=float,
-        help="Speed multiplier relative to real time (e.g. 2.0 = twice as fast).",
-    )
-    parser.add_argument(
-        "--since",
-        type=str,
-        help="Optional lower bound timestamp in MM/DD/YYYY HH:MM:SS.",
-    )
-    parser.add_argument(
-        "--until",
-        type=str,
-        help="Optional upper bound timestamp in MM/DD/YYYY HH:MM:SS.",
-    )
-    parser.add_argument(
-        "--loop",
-        action="store_true",
-        help="Loop back to the start once the end of the file is reached.",
-    )
-    return parser
+                if buffers["event_txt"]:
+                    try:
+                        with open(self.events_txt, "a", encoding="utf-8") as f:
+                            f.writelines(buffers["event_txt"])
+                    except Exception as e:
+                        print(f"WORNING: failed to write TXT log:{e}")
+                    finally:
+                        buffers["event_txt"].clear()     
 
-def main(argv: Optional[Iterable[str]] = None):
-    parser = build_arg_parser()
-    args = parser.parse_args(argv)
+                for _ in batch:
+                    self.log_queue.task_done()
 
-    streamer = AutosysLogStreamer(
-        log_path=args.log_file,
-        speed=args.speed,
-        since=_parse_dt(args.since),
-        until=_parse_dt(args.until),
-        loop=args.loop,
-    )
-    streamer.stream()
+            except Exception as e:
+                print(f"ERROR in logger thread: {e}")
 
-if __name__ == "__main__":
-    main()
+    def _safe_serialize(self, obj):
+        return sanitize_for_json(obj)
+
+    def log_event(
+        self, level: str, module: str, message: str, context: Dict[str, Any] = None
+    ):
+        event = {
+            "timestamp": datetime.now().isoformat(),
+            "level": level,
+            "module": module,
+            "message": message,
+            "context": self._safe_serialize(context) if context else {},
+        }
+
+        try:
+            self.log_queue.put_nowait(("event", event))
+        except queue.Full:
+            print(f"WARNING: Log queue full (10000 items), dropping event: {message}")
+
+    def info(self, module: str, message: str, context: Dict = None):
+        self.log_event("INFO", module, message, context)
+
+    def warning(self, module: str, message: str, context: Dict = None):
+        self.log_event("WARNING", module, message, context)
+
+    def error(self, module: str, message: str, context: Dict = None):
+        self.log_event("ERROR", module, message, context)
+
+    def shutdown(self):
+        print("Shutting down logger, waiting for queue to empty...")
+        print(f"Queue size: {self.log_queue.qsize()}")
+        self.log_queue.join()  # Wait for all logs to be written
+        self.stop_logging.set()
+        self.logger_thread.join(timeout=10)
+        print("Logger shutdown complete")
+
+    def get_queue_size(self):
+        return self.log_queue.qsize()
+
+
+logger = AsyncStructuredLogger(CONFIG["log_dir"])
+
+# =============== STATE MANAGEMENT===================
+
+
+@dataclass
+class JobInstance:
+    """Tracks a running job instance"""
+
+    joid: str
+    runid: str
+    job_name: str
+    machine: str
+    start_time: float
+    predicted_duration: Optional[float]
+    baseline_seconds: Optional[float]
+    alerted: bool = False
+    last_alert_time: Optional[float] = None
+
+    def duration_so_far(self) -> float:
+        return time.monotonic() - self.start_time
+
+    def exceeded_baseline(self) -> bool:
+        ABSOLUTE_GRACE_SECONDS = 30.0
+        RELATIVE_GRACE_FACTOR = 1.20
+        expected = self.predicted_duration
+        if not expected or expected <= 0:
+            return False
+        
+        if expected < 30:
+            return False
+
+        current = self.duration_so_far()
+        return (
+            current >= expected + ABSOLUTE_GRACE_SECONDS
+            and current >= expected * RELATIVE_GRACE_FACTOR
+        )
+
+    def get_exceeded_amount(self) -> Dict[str, float]:
+        if not self.predicted_duration or self.predicted_duration <= 0:
+            return {"seconds": 0, "percent": 0}
+        exceeded = max(0, self.duration_so_far() - self.predicted_duration)
+        return {
+            "seconds": round(exceeded, 2),
+            "percent": round((exceeded / self.predicted_duration) * 100, 2),
+        }
+
+
+class StateManager:
+
+    def __init__(self, alert_cooldown: int = 300):
+        self.running_jobs: Dict[Tuple[str, str], JobInstance] = {}
+        self.lock = threading.Lock()
+        self.alert_cooldown = alert_cooldown
+
+    def start_job(
+        self,
+        joid: str,
+        runid: str,
+        job_name: str,
+        machine: str,
+        predicted_duration: float,
+        baseline_seconds: Optional[float],
+    ):
+        key = (runid, joid)
+        with self.lock:
+
+            if not joid or not runid:
+                logger.warning(
+                    "StateManager",
+                    "Invalid job identifiers",
+                    {"joid": joid, "runid": runid},
+                )
+                return
+
+            self.running_jobs[key] = JobInstance(
+                joid=str(joid),
+                runid=str(runid),
+                job_name=str(job_name),
+                machine=str(machine),
+                start_time=time.monotonic(),
+                predicted_duration=(
+                    float(predicted_duration) if predicted_duration else 0.0
+                ),
+                baseline_seconds=float(baseline_seconds) if baseline_seconds else None,
+            )
+
+    def end_job(self, joid: str, runid: str) -> Optional[JobInstance]:
+        key = (runid, joid)
+        with self.lock:
+            return self.running_jobs.pop(key, None)
+
+    def get_active_jobs(self) -> list:
+        with self.lock:
+            return list(self.running_jobs.values())
+
+    def can_alert_for_job(self, key: Tuple[str, str]) -> bool:
+        with self.lock:
+            job = self.running_jobs.get(key)
+            if not job:
+                return False
+
+            now_mono = time.monotonic()
+
+            if job.alerted and job.last_alert_time:
+                if (now_mono - job.last_alert_time) < self.alert_cooldown:
+                    return False
+
+            job.alerted = True
+            job.last_alert_time = now_mono
+            return True
+
+
+# Global state
+state_manager = StateManager(alert_cooldown=CONFIG["alert_cooldown_seconds"])
+event_buffer = []
+buffer_lock = threading.Lock()
+daily_durations: Dict[str, list] = {}
+MAX_WORKERS = 50
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+STOP_EVENT = threading.Event()
+
+# ============================================================================
+# WORKER ORDER FOR EVENTS
+# ============================================================================
+
+
+class EventOrderingManager:
+    def __init__(self):
+        self.job_queues: Dict[Tuple[str, str], queue.Queue] = defaultdict(
+            lambda: queue.Queue(maxsize=10)
+        )
+
+        self.active_workers = set()
+        self.lock = threading.Lock()
+
+    def submit_event(self, event_data: dict, processor_func):
+        joid = event_data.get("joid")
+        runid = event_data.get("runid")
+
+        if not joid or not runid:
+            executor.submit(processor_func, event_data)
+            return
+
+        key = (str(runid), str(joid))
+
+        try:
+            self.job_queues[key].put((event_data, processor_func), timeout=0.5)
+        except queue.Full:
+            print(f"WARNING: Event queue full for job {joid}")
+            executor.submit(processor_func, event_data)
+            return
+
+        with self.lock:
+            if key not in self.active_workers:
+                self.active_workers.add(key)
+                executor.submit(self._job_worker, key)
+
+    def _job_worker(self, job_key: Tuple[str, str]):
+        job_queue = self.job_queues[job_key]
+
+        while True:
+            try:
+                event_data, processor_func = job_queue.get(timeout=0.5)
+                processor_func(event_data)
+
+                job_queue.task_done()
+
+            except queue.Empty:
+                with self.lock:
+                    if job_queue.empty():
+                        self.active_workers.discard(job_key)
+                        if job_key in self.job_queues:
+                            del self.job_queues[job_key]
+                        break
+            except Exception as e:
+                print(f"Error processing event for job {job_key}: {e}")
+
+
+event_manager = EventOrderingManager()
+
+# ============================================================================
+# MONITORING & RETRAINING
+# ============================================================================
+
+
+def monitor_baselines():
+    logger.info("BaselineMonitor", "Baseline monitoring thread started")
+
+    while not STOP_EVENT.is_set():
+        try:
+            active_jobs = state_manager.get_active_jobs()
+
+            for job in active_jobs:
+                key = (job.runid, job.joid)
+
+                if not job.exceeded_baseline():
+                    continue
+
+                if not state_manager.can_alert_for_job(key):
+                    continue
+
+                exceeded_info = job.get_exceeded_amount()
+                logger.warning(
+                    "BaselineMonitor",
+                    "Baseline exceeded",
+                    {
+                        "joid": job.joid,
+                        "runid": job.runid,
+                        "job_name": job.job_name,
+                        "machine": job.machine,
+                        "baseline_seconds": round(job.predicted_duration, 2),
+                        "current_duration": round(job.duration_so_far(), 2),
+                        "exceeded_by": exceeded_info["seconds"],
+                        "exceeded_by_percent": f"{exceeded_info['percent']}%",
+                    },
+                )
+
+                print(
+                    f"⚠️ ALERT: {job.job_name} exceeded prediction by {exceeded_info['seconds']}s ({exceeded_info['percent']}%)"
+                )
+
+            STOP_EVENT.wait(5)
+
+        except Exception as e:
+            logger.error("BaselineMonitor", f"Monitor error: {str(e)}")
+            STOP_EVENT.wait(5)
+    logger.info("BaselineMonitor", "Baseline monitoring thread stopped")
