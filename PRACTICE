@@ -1,167 +1,230 @@
-from __future__ import annotations
-import argparse
-import re
-import sys
-import time
-from dataclasses import dataclass
-from datetime import datetime
+from runtime_engine import (
+    job_profiles,
+    active_runs,
+    handle_start_event,
+    handle_success_event,
+    handle_failure_event,
+    handle_inactive_event,
+)
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Optional, Sequence
-
-_TIMESTAMP_RE = re.compile(r"\[(\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\]")
-_TS_FMT = "%m/%d/%Y %H:%M:%S"
-
-
-@dataclass(frozen=True)
-class LogEntry:
-    """Represents one logical Autosys log entry."""
-
-    timestamp: Optional[datetime]
-    text: str
+import threading
+import time
+from datetime import datetime
+from live_streamer import AutosysLogStreamer
+from autosys_tail_streamer import AutosysTailStreamer
+from preprocessing import preprocess_stream_line
+from code1 import STOP_EVENT, state_manager, monitor_baselines, logger
+from persistence import load_all_profiles, save_job_profile
+import warnings
 
 
-def _split_line_into_entries(line: str) -> Sequence[LogEntry]:
-    """Split a physical line into logical entries if it embeds multiple timestamps."""
+CONFIG = {
+    "log_dir": r"D:\AI SBI\Sandip\Autosys\FILES",
+    # "log_dir": r"D:\OFFLINE_OFSAA",
 
-    matches = list(_TIMESTAMP_RE.finditer(line))
-    if not matches:
-        return (LogEntry(timestamp=None, text=line.strip()),)
+    "streaming_speed": 1.0,
+}
 
-    entries: list[LogEntry] = []
-    for idx, match in enumerate(matches):
-        ts = datetime.strptime(match.group(1), _TS_FMT)
-        start = match.start()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(line)
-        chunk = line[start:end].strip()
-        entries.append(LogEntry(timestamp=ts, text=chunk))
-    return entries
+# build file path function
+def build_log_file_path(base_dir: str, date: datetime) -> Path:
+    datestr = date.strftime("%m%d%Y")
+    # filename = f"event_demon.SBI.{datestr}.txt"
+    # filename = f"event_demon.RDR.{datestr}.txt"
+    filename = f"event_demon.PDR.{datestr}"
 
 
-def _iter_entries(path: Path) -> Iterator[LogEntry]:
-    with path.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            stripped = raw_line.rstrip("\n")
-            if not stripped:
-                continue
-            yield from _split_line_into_entries(stripped)
+    return Path(base_dir) / filename
 
 
-class AutosysLogStreamer:
-    """Streams historic Autosys logs as if they were emitted live."""
+def on_log_event(event: dict):
 
-    def __init__(
-        self,
-        log_path: Path,
-        *,
-        speed: float = 1.0,
-        since: Optional[datetime] = None,
-        until: Optional[datetime] = None,
-        loop: bool = False,
-        sleeper: Callable[[float], None] = time.sleep,
-    ) -> None:
-        if speed <= 0:
-            raise ValueError("speed must be > 0")
-        self.log_path = log_path
-        self.speed = speed
-        self.since = since
-        self.until = until
-        self.loop = loop
-        self._sleep = sleeper
+    status = event["status"]
+    job_name = event["job_name"]
+    joid = event["joid"]
+    run_id = event["runid"]
+    timestamp = event["timestamp"]
+    machine = event["machine"]
 
-    def _should_emit(self, entry: LogEntry) -> bool:
-        ts = entry.timestamp
-        if ts is None:
-            return True
-        if self.since and ts < self.since:
-            return False
-        if self.until and ts > self.until:
-            return False
-        return True
+    if status == "STARTING":
+        expected = handle_start_event(job_name, joid, run_id)
+        state_manager.start_job(
+            joid=str(joid),
+            runid=str(run_id),
+            job_name=job_name,
+            machine= machine,
+            predicted_duration=expected,
+            baseline_seconds=expected,
+        )
+        logger.info(
+            "jobStart",
+            "job Started",
+            {
+                "timestamp": timestamp,
+                "joid": joid,
+                "runid": run_id,
+                "job_name": job_name,
+                "machine": machine,
+                "expected duration": round(expected, 2) if expected else None,
+            },
+        )
 
-    def _compute_wait(self, prev_ts: Optional[datetime], current_ts: Optional[datetime]) -> float:
-        if prev_ts is None or current_ts is None:
-            return 0.0
-        delta = (current_ts - prev_ts).total_seconds()
-        if delta <= 0:
-            return 0.0
-        return delta / self.speed
+    elif status == "SUCCESS":
+        result = handle_success_event(job_name, joid, run_id, machine)
+        if result is None:
+            return
+        duration, expected_duration = result
+        ended = state_manager.end_job(str(joid), str(run_id))
+        if ended:
+            logger.info(
+                "jobEnd",
+                "job completed Successfully",
+                {
+                    "timestamp": timestamp,
+                    "joid": joid,
+                    "runid": run_id,
+                    "job_name": job_name,
+                    "machine": machine,
+                    "expected_duration": (
+                        round(expected_duration, 2) if expected_duration else None
+                    ),
+                    "duration": round(duration, 2) if duration else None,
+                },
+            )
+        if not ended:
+            return
 
-    def stream(self, emit: Callable[[str], None] = None) -> None:
-        """Replay the log file honoring the original inter-entry timing."""
+    elif status == "FAILURE":
+        handle_failure_event(job_name, joid, run_id, machine)
+        ended = state_manager.end_job(str(joid), str(run_id))
+        if ended:
+            logger.warning(
+                "jobEnd",
+                "job failed",
+                {
+                    "timestamp": timestamp,
+                    "joid": joid,
+                    "runid": run_id,
+                    "job_name": job_name,
+                    "machine": machine,
+                },
+            )
 
-        sink = emit or (lambda text: sys.stdout.write(text + "\n"))
+    elif status == "INACTIVE":
+        handle_inactive_event(job_name, joid, run_id, machine)
+        ended = state_manager.end_job(str(joid), str(run_id))
+        if ended:
+            logger.warning(
+                "jobEnd",
+                "job become inactive",
+                {
+                    "timestamp": timestamp,
+                    "joid": joid,
+                    "runid": run_id,
+                    "job_name": job_name,
+                    "machine": machine,
+                },
+            )
+    else:
+        return
 
-        while True:
-            previous_ts: Optional[datetime] = None
-            emitted_any = False
-            for entry in _iter_entries(self.log_path):
-                if not self._should_emit(entry):
-                    if entry.timestamp and self.until and entry.timestamp > self.until:
-                        # No need to continue scanning - future entries will only be later.
-                        return
-                    continue
+# -------------------------------------------
 
-                wait_seconds = self._compute_wait(previous_ts, entry.timestamp)
-                if wait_seconds:
-                    self._sleep(wait_seconds)
-                self.current_sim_time = entry.timestamp
-                sink(entry.text)
-                emitted_any = True
-                previous_ts = entry.timestamp or previous_ts
+def handle_stream_output(line_text: str):
+    try:
+        rec = preprocess_stream_line(line_text)
+        if not rec:
+            return
 
-            if not self.loop or not emitted_any:
+        required_fields = ["JOID", "RUNID", "JobName", "Status", "timestamp" , "Machine"]
+        missing = [f for f in required_fields if f not in rec]
+        if missing:
+            return
+
+        event_data = {
+            "joid": rec.get("JOID"),
+            "runid": rec.get("RUNID"),
+            "job_name": rec.get("JobName"),
+            "status": rec.get("Status"),
+            "timestamp": rec.get("timestamp"),
+            "machine": rec.get("Machine"),
+        }
+        on_log_event(event_data)
+
+    except Exception as e:
+        print("StreamHandler", f"Error in handle_stream_output: {str(e)}")
+
+
+def run_streamer_forever(base_log_dir: str):
+    current_date = datetime.now().date()
+    current_log_path = build_log_file_path(base_log_dir, datetime.now())
+
+    logger.info("Main", "starting log Streamer", {"log_file": str(current_log_path)})
+    while not STOP_EVENT.is_set():
+# ----->> for production 
+        # streamer = AutosysTailStreamer(current_log_path)
+        # try:
+        #     streamer.stream(emit=handle_stream_output)
+
+# ----->> for the historical logs 
+        streamer = AutosysLogStreamer(log_path=current_log_path, speed=CONFIG["streaming_speed"])
+        try:
+            streamer.stream(emit=handle_stream_output)
+
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            logger.error("Main", "Streamer error", {"error": str(e)})
+
+        while not STOP_EVENT.is_set():
+            now = datetime.now().date()
+            if now != current_date:
+                current_date = now
+                current_log_path = build_log_file_path(base_log_dir, datetime.now())
+
+                logger.info(
+                    "Main",
+                    "log file rollover detected",
+                    {"new_log_file": str(current_log_path)},
+                )
                 break
+            STOP_EVENT.wait(1)
 
+warnings.filterwarnings(
+    "ignore",
+    message = "X does not have valid feature names",
+    category= UserWarning,
+)
+# ------------------------------------------------------------------
+# Main bootstrap
+# ------------------------------------------------------------------
+def main():
+    logger.info("Main", "Started monitoring system")
+    loaded = load_all_profiles()
+    job_profiles.update(loaded)
+    logger.info("main", f"Loaded {len(loaded)} job profiles")
 
-def _parse_dt(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    return datetime.strptime(value, _TS_FMT)
+    monitor_thread = threading.Thread(target=monitor_baselines, daemon=True)
+    monitor_thread.start()
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Replay Autosys logs with their original timing offsets.",
-    )
-    parser.add_argument(
-        "--log-file",
-        default="D:\AUTOSYSLOG\event_demon.SBI.09012025.txt",
-        type=Path,
-    )
-    parser.add_argument(
-        "--speed",
-        default=1.0,
-        type=float,
-        help="Speed multiplier relative to real time (e.g. 2.0 = twice as fast).",
-    )
-    parser.add_argument(
-        "--since",
-        type=str,
-        help="Optional lower bound timestamp in MM/DD/YYYY HH:MM:SS.",
-    )
-    parser.add_argument(
-        "--until",
-        type=str,
-        help="Optional upper bound timestamp in MM/DD/YYYY HH:MM:SS.",
-    )
-    parser.add_argument(
-        "--loop",
-        action="store_true",
-        help="Loop back to the start once the end of the file is reached.",
-    )
-    return parser
+    try:
+        run_streamer_forever(CONFIG["log_dir"])
+    except KeyboardInterrupt:
+        logger.info("Main", "KeyboardInterrupt recieved")
+    finally:
+        logger.info("Main", "Shutting down")
+        print("shutting down the system")
+        STOP_EVENT.set()
 
-def main(argv: Optional[Iterable[str]] = None):
-    parser = build_arg_parser()
-    args = parser.parse_args(argv)
+        for profile in job_profiles.values():
+            try:
+                save_job_profile(profile)
+            except Exception:
+                pass
 
-    streamer = AutosysLogStreamer(
-        log_path=args.log_file,
-        speed=args.speed,
-        since=_parse_dt(args.since),
-        until=_parse_dt(args.until),
-        loop=args.loop,
-    )
-    streamer.stream()
+        time.sleep(0.2)
+        logger.shutdown
+        print("Shutdown Completed!!")
+
 
 if __name__ == "__main__":
     main()
