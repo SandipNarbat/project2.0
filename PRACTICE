@@ -1,97 +1,167 @@
-
-
+from __future__ import annotations
+import argparse
 import re
+import sys
+import time
+from dataclasses import dataclass
 from datetime import datetime
-import threading
-from typing import Optional, Dict, Tuple, Union, List
+from pathlib import Path
+from typing import Callable, Iterable, Iterator, Optional, Sequence
 
-# ===================== REGEX =====================
+_TIMESTAMP_RE = re.compile(r"\[(\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\]")
+_TS_FMT = "%m/%d/%Y %H:%M:%S"
 
-TS_RE = re.compile(r"\[(?P<ts>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\]")
-STATUS_RE = re.compile(r"\bSTATUS:\s*(?P<status>\w+)\b", re.IGNORECASE)
-JOB_RE = re.compile(
-    r"\bJOB:\s*(?P<job>.+?)(?=\s+(?:MACHINE:|JOID:|EXITCODE:|RUNID:|NTRY:|\Z))",
-    re.IGNORECASE,
-)
-MACHINE_RE = re.compile(r"\bMACHINE:\s*(?P<machine>[^\s:]+)", re.IGNORECASE)
-JOID_RE = re.compile(r"\bJOID:\s*(?P<joid>\d+)\b", re.IGNORECASE)
-RUNID_RE = re.compile(r"\bRUNID:\s*(?P<runid>\d+)\b", re.IGNORECASE)
 
-# ===================== HELPERS =====================
+@dataclass(frozen=True)
+class LogEntry:
+    """Represents one logical Autosys log entry."""
 
-def parse_ts(ts_str: str) -> Optional[datetime]:
-    try:
-        return datetime.strptime(ts_str, "%m/%d/%Y %H:%M:%S")
-    except Exception:
+    timestamp: Optional[datetime]
+    text: str
+
+
+def _split_line_into_entries(line: str) -> Sequence[LogEntry]:
+    """Split a physical line into logical entries if it embeds multiple timestamps."""
+
+    matches = list(_TIMESTAMP_RE.finditer(line))
+    if not matches:
+        return (LogEntry(timestamp=None, text=line.strip()),)
+
+    entries: list[LogEntry] = []
+    for idx, match in enumerate(matches):
+        ts = datetime.strptime(match.group(1), _TS_FMT)
+        start = match.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(line)
+        chunk = line[start:end].strip()
+        entries.append(LogEntry(timestamp=ts, text=chunk))
+    return entries
+
+
+def _iter_entries(path: Path) -> Iterator[LogEntry]:
+    with path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            stripped = raw_line.rstrip("\n")
+            if not stripped:
+                continue
+            yield from _split_line_into_entries(stripped)
+
+
+class AutosysLogStreamer:
+    """Streams historic Autosys logs as if they were emitted live."""
+
+    def __init__(
+        self,
+        log_path: Path,
+        *,
+        speed: float = 1.0,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+        loop: bool = False,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if speed <= 0:
+            raise ValueError("speed must be > 0")
+        self.log_path = log_path
+        self.speed = speed
+        self.since = since
+        self.until = until
+        self.loop = loop
+        self._sleep = sleeper
+
+    def _should_emit(self, entry: LogEntry) -> bool:
+        ts = entry.timestamp
+        if ts is None:
+            return True
+        if self.since and ts < self.since:
+            return False
+        if self.until and ts > self.until:
+            return False
+        return True
+
+    def _compute_wait(self, prev_ts: Optional[datetime], current_ts: Optional[datetime]) -> float:
+        if prev_ts is None or current_ts is None:
+            return 0.0
+        delta = (current_ts - prev_ts).total_seconds()
+        if delta <= 0:
+            return 0.0
+        return delta / self.speed
+
+    def stream(self, emit: Callable[[str], None] = None) -> None:
+        """Replay the log file honoring the original inter-entry timing."""
+
+        sink = emit or (lambda text: sys.stdout.write(text + "\n"))
+
+        while True:
+            previous_ts: Optional[datetime] = None
+            emitted_any = False
+            for entry in _iter_entries(self.log_path):
+                if not self._should_emit(entry):
+                    if entry.timestamp and self.until and entry.timestamp > self.until:
+                        # No need to continue scanning - future entries will only be later.
+                        return
+                    continue
+
+                wait_seconds = self._compute_wait(previous_ts, entry.timestamp)
+                if wait_seconds:
+                    self._sleep(wait_seconds)
+                self.current_sim_time = entry.timestamp
+                sink(entry.text)
+                emitted_any = True
+                previous_ts = entry.timestamp or previous_ts
+
+            if not self.loop or not emitted_any:
+                break
+
+
+def _parse_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
         return None
+    return datetime.strptime(value, _TS_FMT)
 
-# ===================== STATE =====================
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Replay Autosys logs with their original timing offsets.",
+    )
+    parser.add_argument(
+        "--log-file",
+        default="D:\AUTOSYSLOG\event_demon.SBI.09012025.txt",
+        type=Path,
+    )
+    parser.add_argument(
+        "--speed",
+        default=1.0,
+        type=float,
+        help="Speed multiplier relative to real time (e.g. 2.0 = twice as fast).",
+    )
+    parser.add_argument(
+        "--since",
+        type=str,
+        help="Optional lower bound timestamp in MM/DD/YYYY HH:MM:SS.",
+    )
+    parser.add_argument(
+        "--until",
+        type=str,
+        help="Optional upper bound timestamp in MM/DD/YYYY HH:MM:SS.",
+    )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="Loop back to the start once the end of the file is reached.",
+    )
+    return parser
 
-active_jobs: Dict[Tuple[int, int], bool] = {}
-state_lock = threading.Lock()
+def main(argv: Optional[Iterable[str]] = None):
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
 
-# ===================== PREPROCESSOR =====================
+    streamer = AutosysLogStreamer(
+        log_path=args.log_file,
+        speed=args.speed,
+        since=_parse_dt(args.since),
+        until=_parse_dt(args.until),
+        loop=args.loop,
+    )
+    streamer.stream()
 
-def preprocess_stream_line(
-    line: str,
-) -> Optional[Union[dict, List[dict]]]:
-
-    if not line or len(line.strip()) < 3:
-        return None
-
-    ts_m = TS_RE.search(line)
-    status_m = STATUS_RE.search(line)
-    job_m = JOB_RE.search(line)
-    machine_m = MACHINE_RE.search(line)
-    joid_m = JOID_RE.search(line)
-    runid_m = RUNID_RE.search(line)
-
-    ts = parse_ts(ts_m.group("ts")) if ts_m else None
-    status = status_m.group("status").upper() if status_m else None
-    job = job_m.group("job").strip() if job_m else None
-    machine = machine_m.group("machine").strip() if machine_m else ""
-    joid = int(joid_m.group("joid")) if joid_m else None
-    runid = int(runid_m.group("runid")) if runid_m else None
-
-    if status not in {"STARTING", "RUNNING", "SUCCESS", "FAILURE","INACTIVE"}:
-        return None
-
-    rec = {
-        "JOID": joid,
-        "JobName": job,
-        "Machine": machine,
-        "RUNID": runid,
-        "Status": status,
-        "timestamp": ts,
-    }
-
-    if joid is None or runid is None:
-        return rec
-
-    key = (joid, runid)
-
-    with state_lock:
-
-        # ===================== STARTING =====================
-        if status == "STARTING":
-            active_jobs[key] = True
-            return rec
-
-        # ===================== RUNNING =====================
-        if status == "RUNNING":
-            if key not in active_jobs:
-                active_jobs[key] = True
-                fake = dict(rec)
-                fake["Status"] = "STARTING"
-                fake["synthetic"] = True
-
-                return fake
-
-            return rec
-
-        # ===================== TERMINAL =====================
-        if status in {"SUCCESS", "FAILURE","INACTIVE"}:
-            active_jobs.pop(key, None)
-            return rec
-
-    return rec
+if __name__ == "__main__":
+    main()
