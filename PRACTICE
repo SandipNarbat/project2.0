@@ -1,536 +1,244 @@
-from pathlib import Path
-from datetime import date, datetime
-import json
-import threading
-import time
-from typing import Dict, Any, Optional, Tuple
-from dataclasses import dataclass, asdict
-import numpy as np
-import concurrent.futures
-import queue
-from collections import defaultdict
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
+const chokidar = require('chokidar');
+const fs = require('fs');
+const fsp = require("fs/promises");
+const path = require('path');
+const { finished } = require('stream');
+const { promisify } = require('util');
+const finishedPromise = promisify(finished);
 
-CONFIG = {
-    "log_dir": "logs",
-    "alert_on_baseline_exceeded": True,
-    "alert_cooldown_seconds": 300,
+
+
+const WATCH_DIR = "/home/smartportal02/portal_data/";
+const DATE_FILE = path.join(WATCH_DIR, 'MFLAGS_D');
+const DEBOUNCE_DELAY = 300;
+
+
+
+// State
+let CURRENT_DATE = null;
+let mergeTimeout;
+let watcher;
+const pendingChanges = new Map();
+let GROUP_RULES = [];
+
+
+function initializeGroupRules(date) {
+    return [
+        {
+
+            fileNames: [`atm_PORT_DT_app1.txt.${date}`, `atm_PORT_DT_app2.txt.${date}`, `atm_PORT_DT_app3.txt.${date}`, `atm_PORT_DT_app4.txt.${date}`, `atm_PORT_DT_app5.txt.${date}`, `atm_PORT_DT_app6.txt.${date}`, `atm_PORT_DT_app7.txt.${date}`, `atm_PORT_DT_app8.txt.${date}`, `atm_PORT_DT_app9.txt.${date}`, `atm_PORT_DT_app10.txt.${date}`, `atm_PORT_DT_app11.txt.${date}`, `atm_PORT_DT_app12.txt.${date}`, `atm_PORT_DT_app13.txt.${date}`, `atm_PORT_DT_app14.txt.${date}`, `atm_PORT_DT_app15.txt.${date}`, `atm_PORT_DT_app16.txt.${date}`],
+            output: `atm_merge.txt.${date}`,
+            function: "atmMerge"
+        }
+
+    ];
 }
 
-# ============================================================================
-# UTILITIES - JSON SERIALIZATION FIX
-# ============================================================================
-
-
-def sanitize_for_json(obj):
-    if isinstance(obj, (datetime, date)):
-        return obj.isoformat()
-    elif isinstance(obj, dict):
-        return {k: sanitize_for_json(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [sanitize_for_json(item) for item in obj]
-    elif isinstance(obj, (np.integer, np.int64, np.int32)):
-        return int(obj)
-    elif isinstance(obj, (np.floating, np.float64, np.float32)):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, set):
-        return list(obj)
-    else:
-        return obj
-
-
-# ============================================================================
-# LOGGING - ✅ FIXED: JSON SERIALIZATION
-# ============================================================================
-
-
-@dataclass
-class LogEvent:
-    timestamp: str
-    level: str
-    module: str
-    message: str
-    context: Dict[str, Any] = None
-
-    def to_dict(self):
-        return asdict(self)
-
-
-class AsyncStructuredLogger:
-    """
-    Lossless asynchronous structured logger.
-
-    Design goals:
-    - Never intentionally drop a log because the queue is full.
-    - Apply backpressure to the producer when the queue is full.
-    - Batch file writes for high throughput.
-    - Retry failed file writes instead of marking the batch complete.
-    - Track received/written/dropped events for load testing.
-    """
-
-    QUEUE_MAXSIZE = 50000
-    BATCH_SIZE = 100
-    RETRY_DELAY_SECONDS = 0.5
-
-    def current_log_date(self) -> str:
-        return date.today().isoformat()
-
-    def __init__(self, log_dir: str):
-        self.current_date = self.current_log_date()
-        self.log_dir = Path(log_dir)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-
-        self.events_log = self.log_dir / f"MonitAI_{self.current_date}.jsonl"
-        self.events_txt = self.log_dir / f"MonitAI_{self.current_date}.txt"
-
-        # Bounded queue + blocking put = backpressure, NOT data loss.
-        self.log_queue = queue.Queue(maxsize=self.QUEUE_MAXSIZE)
-
-        self.stop_logging = threading.Event()
-
-        # Counters used to verify lossless behavior during 500+ LPS tests.
-        self._stats_lock = threading.Lock()
-        self.events_received = 0
-        self.events_written = 0
-        self.events_dropped = 0
-        self.write_errors = 0
-
-        self.logger_thread = threading.Thread(
-            target=self._log_worker,
-            name="MonitAI-Logger",
-            daemon=True,
-        )
-        self.logger_thread.start()
-
-        print(
-            f"AsyncStructuredLogger initialized - "
-            f"background thread started, queue={self.QUEUE_MAXSIZE}"
-        )
-
-    def _update_stat(self, name: str, amount: int = 1):
-        with self._stats_lock:
-            setattr(self, name, getattr(self, name) + amount)
-
-    def _write_batch(self, batch):
-        """
-        Write a batch to both log files.
-
-        The batch is considered complete only after BOTH files have been
-        successfully written. If one write fails, retry it. This prevents
-        the worker from silently losing a batch after an I/O exception.
-        """
-        event_lines = []
-        txt_lines = []
-
-        for log_type, data in batch:
-            if log_type != "event":
-                continue
-
-            event_lines.append(json.dumps(data, ensure_ascii=False) + "\n")
-
-            ts = data["timestamp"]
-            level = data["level"]
-            module = data["module"]
-            message = data["message"]
-            context = data.get("context", {})
-
-            txt_line = f"[{ts}] [{level}] [{module}] {message}"
-            if context:
-                txt_line += f" | {context}"
-
-            txt_lines.append(txt_line + "\n")
-
-        if not event_lines:
-            return
-
-        json_written = False
-        txt_written = False
-
-        # Retry until both destinations succeed.
-        # This intentionally favors durability over silently dropping logs.
-        while not (json_written and txt_written):
-            if self.stop_logging.is_set():
-                # Shutdown does NOT cancel pending writes. The flag only tells
-                # the worker to stop after the queue is drained.
-                pass
-
-            try:
-                if not json_written:
-                    with open(self.events_log, "a", encoding="utf-8") as f:
-                        f.writelines(event_lines)
-                        f.flush()
-                    json_written = True
-
-            except Exception as e:
-                self._update_stat("write_errors")
-                print(f"ERROR: failed to write JSON log batch: {e}")
-                time.sleep(self.RETRY_DELAY_SECONDS)
-
-            try:
-                if not txt_written:
-                    with open(self.events_txt, "a", encoding="utf-8") as f:
-                        f.writelines(txt_lines)
-                        f.flush()
-                    txt_written = True
-
-            except Exception as e:
-                self._update_stat("write_errors")
-                print(f"ERROR: failed to write TXT log batch: {e}")
-                time.sleep(self.RETRY_DELAY_SECONDS)
-
-        self._update_stat("events_written", len(event_lines))
-
-    def _log_worker(self):
-        while not self.stop_logging.is_set() or not self.log_queue.empty():
-            new_date = self.current_log_date()
-
-            if new_date != self.current_date:
-                self.current_date = new_date
-                self.events_log = self.log_dir / f"MonitAI_{new_date}.jsonl"
-                self.events_txt = self.log_dir / f"MonitAI_{new_date}.txt"
-
-            batch = []
-
-            try:
-                # Wait for the first event.
-                batch.append(self.log_queue.get(timeout=0.1))
-
-                # Drain additional events without blocking.
-                for _ in range(self.BATCH_SIZE - 1):
-                    try:
-                        batch.append(self.log_queue.get_nowait())
-                    except queue.Empty:
-                        break
-
-                # Write the batch. If an I/O error occurs, _write_batch()
-                # retries instead of discarding the batch.
-                self._write_batch(batch)
-
-            except queue.Empty:
-                continue
-
-            except Exception as e:
-                # Unexpected worker error: do NOT lose the batch.
-                self._update_stat("write_errors")
-                print(f"ERROR in logger thread: {e}")
-
-                # Retry the already-dequeued batch if one exists.
-                if batch:
-                    try:
-                        self._write_batch(batch)
-                    except Exception as retry_error:
-                        print(
-                            f"CRITICAL: logger retry failed: {retry_error}"
-                        )
-                        # Do not call task_done here; keeping the unfinished
-                        # count means shutdown cannot falsely report success.
-                        time.sleep(self.RETRY_DELAY_SECONDS)
-                        continue
-
-            finally:
-                # Every successfully dequeued item must be acknowledged exactly
-                # once. _write_batch() itself never calls task_done().
-                if batch:
-                    for _ in batch:
-                        self.log_queue.task_done()
-
-    def _safe_serialize(self, obj):
-        return sanitize_for_json(obj)
-
-    def log_event(
-        self,
-        level: str,
-        module: str,
-        message: str,
-        context: Dict[str, Any] = None,
-    ):
-        event = {
-            "timestamp": datetime.now().isoformat(),
-            "level": level,
-            "module": module,
-            "message": message,
-            "context": self._safe_serialize(context) if context else {},
+function readDateFromFile() {
+    try {
+        if (!fs.existsSync(DATE_FILE)) {
+            console.warn(`Date file ${DATE_FILE} not found. Using system date.`);
+            return new Date().toISOString().slice(0, 10).replace(/-/g, '');
         }
+        return fs.readFileSync(DATE_FILE, 'utf8').trim();
+    } catch (err) {
+        console.error('Error reading date file:', err);
+        return new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    }
+}
 
-        self._update_stat("events_received")
+function getGroupsForFile(filePath) {
+    const fileName = path.basename(filePath);
+    const groups = [];
+    for (const rule of GROUP_RULES) {
+        if (rule.fileNames && rule.fileNames.includes(fileName)) {
+            groups.push({ output: rule.output, files: rule.fileNames });
+        }
+    }
+    return groups;
+}
 
-        # IMPORTANT:
-        # put() blocks when the queue is full instead of dropping the event.
-        # This creates backpressure and preserves every log record.
-        self.log_queue.put(("event", event))
 
-    def info(self, module: str, message: str, context: Dict = None):
-        self.log_event("INFO", module, message, context)
+async function atmMerge(fileList, outputFile) {
+    const validFiles = fileList
+        .map(f => path.join(WATCH_DIR, f))
+        .filter(f => fs.existsSync(f));
 
-    def warning(self, module: str, message: str, context: Dict = None):
-        self.log_event("WARNING", module, message, context)
+    if (validFiles.length === 0) {
+        console.log(`No input files found for ${outputFile}.`);
+        return;
+    }
 
-    def error(self, module: str, message: str, context: Dict = None):
-        self.log_event("ERROR", module, message, context)
+    const outputPath = path.join(WATCH_DIR, outputFile);
+    const output = fs.createWriteStream(outputPath);
 
-    def shutdown(self):
-        print("Shutting down logger, waiting for queue to empty...")
-        print(f"Queue size: {self.log_queue.qsize()}")
+    try {
+        for (const filePath of validFiles) {
+            const fileName = path.basename(filePath);
 
-        # Wait until every queued event has been written.
-        self.log_queue.join()
+            output.write(`${fileName}\n`);
 
-        self.stop_logging.set()
-        self.logger_thread.join(timeout=30)
+            const stream = fs.createReadStream(filePath);
+            const rl = require('readline').createInterface({
+                input: stream,
+                crlfDelay: Infinity
+            });
 
-        stats = self.get_stats()
-        print(
-            "Logger shutdown complete | "
-            f"received={stats['events_received']} | "
-            f"written={stats['events_written']} | "
-            f"dropped={stats['events_dropped']} | "
-            f"write_errors={stats['write_errors']}"
-        )
-
-    def get_queue_size(self):
-        return self.log_queue.qsize()
-
-    def get_stats(self):
-        with self._stats_lock:
-            return {
-                "events_received": self.events_received,
-                "events_written": self.events_written,
-                "events_dropped": self.events_dropped,
-                "write_errors": self.write_errors,
-                "queue_size": self.log_queue.qsize(),
+            for await (const line of rl) {
+                const trimmedLine = line.trim();
+                if (trimmedLine) {
+                    output.write(`${trimmedLine}\n`);
+                }
             }
 
-
-logger = AsyncStructuredLogger(CONFIG["log_dir"])
-
-# =============== STATE MANAGEMENT===================
-
-
-@dataclass
-class JobInstance:
-    """Tracks a running job instance"""
-
-    joid: str
-    runid: str
-    job_name: str
-    machine: str
-    start_time: float
-    predicted_duration: Optional[float]
-    baseline_seconds: Optional[float]
-    alerted: bool = False
-    last_alert_time: Optional[float] = None
-
-    def duration_so_far(self) -> float:
-        return time.monotonic() - self.start_time
-
-    def exceeded_baseline(self) -> bool:
-        ABSOLUTE_GRACE_SECONDS = 30.0
-        RELATIVE_GRACE_FACTOR = 1.20
-        expected = self.predicted_duration
-        if not expected or expected <= 0:
-            return False
-        
-        if expected < 30:
-            return False
-
-        current = self.duration_so_far()
-        return (
-            current >= expected + ABSOLUTE_GRACE_SECONDS
-            and current >= expected * RELATIVE_GRACE_FACTOR
-        )
-
-    def get_exceeded_amount(self) -> Dict[str, float]:
-        if not self.predicted_duration or self.predicted_duration <= 0:
-            return {"seconds": 0, "percent": 0}
-        exceeded = max(0, self.duration_so_far() - self.predicted_duration)
-        return {
-            "seconds": round(exceeded, 2),
-            "percent": round((exceeded / self.predicted_duration) * 100, 2),
+            await new Promise((resolve) => {
+                if (stream.closed) resolve();
+                else stream.on('close', resolve);
+            });
         }
 
-
-class StateManager:
-
-    def __init__(self, alert_cooldown: int = 300):
-        self.running_jobs: Dict[Tuple[str, str], JobInstance] = {}
-        self.lock = threading.Lock()
-        self.alert_cooldown = alert_cooldown
-
-    def start_job(
-        self,
-        joid: str,
-        runid: str,
-        job_name: str,
-        machine: str,
-        predicted_duration: float,
-        baseline_seconds: Optional[float],
-    ):
-        key = (runid, joid)
-        with self.lock:
-
-            if not joid or not runid:
-                logger.warning(
-                    "StateManager",
-                    "Invalid job identifiers",
-                    {"joid": joid, "runid": runid},
-                )
-                return
-
-            self.running_jobs[key] = JobInstance(
-                joid=str(joid),
-                runid=str(runid),
-                job_name=str(job_name),
-                machine=str(machine),
-                start_time=time.monotonic(),
-                predicted_duration=(
-                    float(predicted_duration) if predicted_duration else 0.0
-                ),
-                baseline_seconds=float(baseline_seconds) if baseline_seconds else None,
-            )
-
-    def end_job(self, joid: str, runid: str) -> Optional[JobInstance]:
-        key = (runid, joid)
-        with self.lock:
-            return self.running_jobs.pop(key, None)
-
-    def get_active_jobs(self) -> list:
-        with self.lock:
-            return list(self.running_jobs.values())
-
-    def can_alert_for_job(self, key: Tuple[str, str]) -> bool:
-        with self.lock:
-            job = self.running_jobs.get(key)
-            if not job:
-                return False
-
-            now_mono = time.monotonic()
-
-            if job.alerted and job.last_alert_time:
-                if (now_mono - job.last_alert_time) < self.alert_cooldown:
-                    return False
-
-            job.alerted = True
-            job.last_alert_time = now_mono
-            return True
+        output.end();
+        await finishedPromise(output);
+        console.log(`[${new Date().toLocaleTimeString()}] Merged ${validFiles.length} files into ${outputFile}`);
+    } catch (err) {
+        console.error('Merge error:', err);
+        output.destroy(err);
+        throw err;
+    }
+}
 
 
-# Global state
-state_manager = StateManager(alert_cooldown=CONFIG["alert_cooldown_seconds"])
-event_buffer = []
-buffer_lock = threading.Lock()
-daily_durations: Dict[str, list] = {}
-MAX_WORKERS = 50
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
-STOP_EVENT = threading.Event()
+async function performGroupMerge(outputFile, inputFiles) {
+    if (inputFiles.size === 0) return;
+    const rule = GROUP_RULES.find(r => r.output === outputFile);
+    const mergeFn = (rule && MERGE_FUNCTIONS[rule.function]) || trickleMerge;
+    await mergeFn(Array.from(inputFiles), outputFile);
+}
 
-# ============================================================================
-# WORKER ORDER FOR EVENTS
-# ============================================================================
+let processing = false;
 
+async function processQueue() {
+    if (processing) return;
+    processing = true;
 
-class EventOrderingManager:
-    def __init__(self):
-        self.job_queues: Dict[Tuple[str, str], queue.Queue] = defaultdict(
-            lambda: queue.Queue(maxsize=10)
-        )
+    try {
+        while (pendingChanges.size > 0) {
+            const promises = [];
+            for (const [outputFile, inputFiles] of pendingChanges.entries()) {
+                promises.push(performGroupMerge(outputFile, inputFiles));
+            }
+            pendingChanges.clear();
+            await Promise.all(promises);
 
-        self.active_workers = set()
-        self.lock = threading.Lock()
+        }
+    } finally {
+        processing = false;
+    }
+}
 
-    def submit_event(self, event_data: dict, processor_func):
-        joid = event_data.get("joid")
-        runid = event_data.get("runid")
+function handleFileEvent(filePath) {
+    const fileName = path.basename(filePath);
+    if (fileName === path.basename(DATE_FILE)) return;
 
-        if not joid or not runid:
-            executor.submit(processor_func, event_data)
-            return
+    const groups = getGroupsForFile(filePath);
+    if (groups.length === 0) return;
 
-        key = (str(runid), str(joid))
+    groups.forEach(({ output, files }) => {
+        if (!pendingChanges.has(output)) pendingChanges.set(output, new Set(files));
+    });
 
-        try:
-            self.job_queues[key].put((event_data, processor_func), timeout=0.5)
-        except queue.Full:
-            print(f"WARNING: Event queue full for job {joid}")
-            executor.submit(processor_func, event_data)
-            return
+    if (!processing) {
+        clearTimeout(mergeTimeout);
+        mergeTimeout = setTimeout(() => processQueue().catch(console.error), DEBOUNCE_DELAY);
+    }
+}
 
-        with self.lock:
-            if key not in self.active_workers:
-                self.active_workers.add(key)
-                executor.submit(self._job_worker, key)
+async function handleDateRollover() {
+    const newDate = readDateFromFile();
+    if (newDate !== CURRENT_DATE) {
+        console.log(`\n--- DATE ROLLOVER: ${CURRENT_DATE} -> ${newDate} ---`);
+        CURRENT_DATE = newDate;
+        GROUP_RULES = initializeGroupRules(CURRENT_DATE);
+        pendingChanges.clear();
+        clearTimeout(mergeTimeout);
 
-    def _job_worker(self, job_key: Tuple[str, str]):
-        job_queue = self.job_queues[job_key]
-
-        while True:
-            try:
-                event_data, processor_func = job_queue.get(timeout=0.5)
-                processor_func(event_data)
-
-                job_queue.task_done()
-
-            except queue.Empty:
-                with self.lock:
-                    if job_queue.empty():
-                        self.active_workers.discard(job_key)
-                        if job_key in self.job_queues:
-                            del self.job_queues[job_key]
-                        break
-            except Exception as e:
-                print(f"Error processing event for job {job_key}: {e}")
+        for (const rule of GROUP_RULES) {
+            pendingChanges.set(rule.output, new Set(rule.fileNames));
+        }
+        await processQueue();
+    }
+}
 
 
-event_manager = EventOrderingManager()
+let queueTimer;
 
-# ============================================================================
-# MONITORING & RETRAINING
-# ============================================================================
+function scheduleMerge() {
+    if (processing) return;
+    clearTimeout(queueTimer);
+    queueTimer = setTimeout(async () => {
+        processing = true;
+        try {
+            await processQueue();
+        } finally {
+            processing = false;
+        }
+    }, 200);
+}
 
 
-def monitor_baselines():
-    logger.info("BaselineMonitor", "Baseline monitoring thread started")
 
-    while not STOP_EVENT.is_set():
-        try:
-            active_jobs = state_manager.get_active_jobs()
+async function init() {
+    CURRENT_DATE = readDateFromFile();
+    GROUP_RULES = initializeGroupRules(CURRENT_DATE);
 
-            for job in active_jobs:
-                key = (job.runid, job.joid)
+    // Watcher configuration
+    watcher = chokidar.watch(WATCH_DIR, {
+        ignored: (filePath) => {
+            const name = path.basename(filePath);
+            return name.startsWith('.') && name !== path.basename(DATE_FILE);
+        },
+        persistent: true,
+        ignoreInitial: true,
+        awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
+        usePolling: false,
+    });
 
-                if not job.exceeded_baseline():
-                    continue
+    watcher
+        .on('add', (filePath) => {
+            handleFileEvent(filePath);
+            scheduleMerge();
+        })
+        .on('change', (filePath) => {
+            if (path.basename(filePath) === path.basename(DATE_FILE)) {
+                handleDateRollover();
+            } else {
+                handleFileEvent(filePath);
+                scheduleMerge();        // ← NEW
+            }
+        })
+        // .on('unlink', handleFileEvent)
+        .on('error', error => console.error('Watcher error:', error));
 
-                if not state_manager.can_alert_for_job(key):
-                    continue
+    watcher.on('ready', async () => {
+        console.log('Initial scan complete. Triggering startup merge...');
+        for (const rule of GROUP_RULES) {
+            pendingChanges.set(rule.output, new Set(rule.fileNames));
 
-                exceeded_info = job.get_exceeded_amount()
-                logger.warning(
-                    "BaselineMonitor",
-                    "Baseline exceeded",
-                    {
-                        "joid": job.joid,
-                        "runid": job.runid,
-                        "job_name": job.job_name,
-                        "machine": job.machine,
-                        "baseline_seconds": round(job.predicted_duration, 2),
-                        "current_duration": round(job.duration_so_far(), 2),
-                        "exceeded_by": exceeded_info["seconds"],
-                        "exceeded_by_percent": f"{exceeded_info['percent']}%",
-                    },
-                )
+        }
+        await processQueue();
+        console.log('Startup merge complete. Now watching for changes... Press Ctrl+C to stop.');
 
-                print(
-                    f"⚠️ ALERT: {job.job_name} exceeded prediction by {exceeded_info['seconds']}s ({exceeded_info['percent']}%)"
-                )
+        if (process.stdin.isTTY) {
+            process.stdin.pause();
+        }
+    });
+}
 
-            STOP_EVENT.wait(5)
 
-        except Exception as e:
-            logger.error("BaselineMonitor", f"Monitor error: {str(e)}")
-            STOP_EVENT.wait(5)
-    logger.info("BaselineMonitor", "Baseline monitoring thread stopped")
+
+const MERGE_FUNCTIONS = {
+    atmMerge,
+};
+
+init()
