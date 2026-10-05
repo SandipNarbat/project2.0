@@ -1,244 +1,287 @@
+import React, { useState, useEffect, useRef, useMemo } from "react";
+import { IconList, IconThumbDown, IconCross, IconCheck, IconWarning, IconError } from "./Icons";
+// import { useState } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
+import QueueReplica from "../blocks/QueueReplica";
+import PaceBuildup from "../blocks/PaceBuildup";
+import ReplicaStatus from "../blocks/ReplicaStatus";
+import TpmTps from "../blocks/TpmTps";
 
-const chokidar = require('chokidar');
-const fs = require('fs');
-const fsp = require("fs/promises");
-const path = require('path');
-const { finished } = require('stream');
-const { promisify } = require('util');
-const finishedPromise = promisify(finished);
-
-
-
-const WATCH_DIR = "/home/smartportal02/portal_data/";
-const DATE_FILE = path.join(WATCH_DIR, 'MFLAGS_D');
-const DEBOUNCE_DELAY = 300;
-
-
-
-// State
-let CURRENT_DATE = null;
-let mergeTimeout;
-let watcher;
-const pendingChanges = new Map();
-let GROUP_RULES = [];
-
-
-function initializeGroupRules(date) {
-    return [
-        {
-
-            fileNames: [`atm_PORT_DT_app1.txt.${date}`, `atm_PORT_DT_app2.txt.${date}`, `atm_PORT_DT_app3.txt.${date}`, `atm_PORT_DT_app4.txt.${date}`, `atm_PORT_DT_app5.txt.${date}`, `atm_PORT_DT_app6.txt.${date}`, `atm_PORT_DT_app7.txt.${date}`, `atm_PORT_DT_app8.txt.${date}`, `atm_PORT_DT_app9.txt.${date}`, `atm_PORT_DT_app10.txt.${date}`, `atm_PORT_DT_app11.txt.${date}`, `atm_PORT_DT_app12.txt.${date}`, `atm_PORT_DT_app13.txt.${date}`, `atm_PORT_DT_app14.txt.${date}`, `atm_PORT_DT_app15.txt.${date}`, `atm_PORT_DT_app16.txt.${date}`],
-            output: `atm_merge.txt.${date}`,
-            function: "atmMerge"
-        }
-
-    ];
+function getPillClass(val) {
+  // console.log(val)
+  if(val === "NQKE") return;
+  if (Number(val) === 0) return "pill pill-zero";
+  if (Number(val) <= 99) return "pill pill-zero";
+  if (Number(val) <= 499) return "pill pill-orange";
+  return "pill pill-red";
 }
 
-function readDateFromFile() {
-    try {
-        if (!fs.existsSync(DATE_FILE)) {
-            console.warn(`Date file ${DATE_FILE} not found. Using system date.`);
-            return new Date().toISOString().slice(0, 10).replace(/-/g, '');
-        }
-        return fs.readFileSync(DATE_FILE, 'utf8').trim();
-    } catch (err) {
-        console.error('Error reading date file:', err);
-        return new Date().toISOString().slice(0, 10).replace(/-/g, '');
+const SERVERS = {
+  "M": "i",
+  "S1": "I",
+  "S2": "a",
+  "S3": "b",
+  "S4": "c",
+  "S5": "d",
+  "S6": "e",
+  "S7": "f",
+  "S8": "g",
+  "S9": "h",
+  "S10": "j",
+  "S11": "k",
+  "S12": "m",
+  "S13": "n",
+  "S14": "p",
+  "S15": "q",
+}
+
+const BOTTOM_KEYS = ["CTAQ", "CRCQ", "ONLQ", "CTDQ", "PF1Q", "RESPQ", "SDVQ", "VV1Q", "VV2Q", "VV3Q", "ARCQ", "KCCQ", "FA1Q", "SFDQ", "GLAQ"];
+const QueueAnimatedCell = React.memo(function QueueAnimatedCell({ value, k , i}) {
+  const [highlight, setHighlight] = useState(false);
+  const prev = useRef(value);
+  useEffect(() => {
+    if (prev.current !== value) {
+      setHighlight(true);
+      const timer = setTimeout(() => setHighlight(false), 800);
+      prev.current = value;
+      return () => clearTimeout(timer);
     }
-}
-
-function getGroupsForFile(filePath) {
-    const fileName = path.basename(filePath);
-    const groups = [];
-    for (const rule of GROUP_RULES) {
-        if (rule.fileNames && rule.fileNames.includes(fileName)) {
-            groups.push({ output: rule.output, files: rule.fileNames });
-        }
-    }
-    return groups;
-}
+  }, [value]);
+  return (
+    <td className={highlight ? "highlight-row" : ""}>
+      <span className={getPillClass(value)}>{value === "NQKE" ? <IconThumbDown /> : Number(value) < 99 ? 0 : value}</span>
+    </td>
+  );
+});
 
 
-async function atmMerge(fileList, outputFile) {
-    const validFiles = fileList
-        .map(f => path.join(WATCH_DIR, f))
-        .filter(f => fs.existsSync(f));
+const fromatTime = (dateInput) => {
+  if (dateInput === "" || dateInput === undefined) return;
+  const hh = dateInput.slice(0, 2);
+  const mm = dateInput.slice(2, 4);
+  const ss = dateInput.slice(4,);
 
-    if (validFiles.length === 0) {
-        console.log(`No input files found for ${outputFile}.`);
-        return;
-    }
-
-    const outputPath = path.join(WATCH_DIR, outputFile);
-    const output = fs.createWriteStream(outputPath);
-
-    try {
-        for (const filePath of validFiles) {
-            const fileName = path.basename(filePath);
-
-            output.write(`${fileName}\n`);
-
-            const stream = fs.createReadStream(filePath);
-            const rl = require('readline').createInterface({
-                input: stream,
-                crlfDelay: Infinity
-            });
-
-            for await (const line of rl) {
-                const trimmedLine = line.trim();
-                if (trimmedLine) {
-                    output.write(`${trimmedLine}\n`);
-                }
-            }
-
-            await new Promise((resolve) => {
-                if (stream.closed) resolve();
-                else stream.on('close', resolve);
-            });
-        }
-
-        output.end();
-        await finishedPromise(output);
-        console.log(`[${new Date().toLocaleTimeString()}] Merged ${validFiles.length} files into ${outputFile}`);
-    } catch (err) {
-        console.error('Merge error:', err);
-        output.destroy(err);
-        throw err;
-    }
-}
-
-
-async function performGroupMerge(outputFile, inputFiles) {
-    if (inputFiles.size === 0) return;
-    const rule = GROUP_RULES.find(r => r.output === outputFile);
-    const mergeFn = (rule && MERGE_FUNCTIONS[rule.function]) || trickleMerge;
-    await mergeFn(Array.from(inputFiles), outputFile);
-}
-
-let processing = false;
-
-async function processQueue() {
-    if (processing) return;
-    processing = true;
-
-    try {
-        while (pendingChanges.size > 0) {
-            const promises = [];
-            for (const [outputFile, inputFiles] of pendingChanges.entries()) {
-                promises.push(performGroupMerge(outputFile, inputFiles));
-            }
-            pendingChanges.clear();
-            await Promise.all(promises);
-
-        }
-    } finally {
-        processing = false;
-    }
-}
-
-function handleFileEvent(filePath) {
-    const fileName = path.basename(filePath);
-    if (fileName === path.basename(DATE_FILE)) return;
-
-    const groups = getGroupsForFile(filePath);
-    if (groups.length === 0) return;
-
-    groups.forEach(({ output, files }) => {
-        if (!pendingChanges.has(output)) pendingChanges.set(output, new Set(files));
-    });
-
-    if (!processing) {
-        clearTimeout(mergeTimeout);
-        mergeTimeout = setTimeout(() => processQueue().catch(console.error), DEBOUNCE_DELAY);
-    }
-}
-
-async function handleDateRollover() {
-    const newDate = readDateFromFile();
-    if (newDate !== CURRENT_DATE) {
-        console.log(`\n--- DATE ROLLOVER: ${CURRENT_DATE} -> ${newDate} ---`);
-        CURRENT_DATE = newDate;
-        GROUP_RULES = initializeGroupRules(CURRENT_DATE);
-        pendingChanges.clear();
-        clearTimeout(mergeTimeout);
-
-        for (const rule of GROUP_RULES) {
-            pendingChanges.set(rule.output, new Set(rule.fileNames));
-        }
-        await processQueue();
-    }
-}
-
-
-let queueTimer;
-
-function scheduleMerge() {
-    if (processing) return;
-    clearTimeout(queueTimer);
-    queueTimer = setTimeout(async () => {
-        processing = true;
-        try {
-            await processQueue();
-        } finally {
-            processing = false;
-        }
-    }, 200);
-}
-
-
-
-async function init() {
-    CURRENT_DATE = readDateFromFile();
-    GROUP_RULES = initializeGroupRules(CURRENT_DATE);
-
-    // Watcher configuration
-    watcher = chokidar.watch(WATCH_DIR, {
-        ignored: (filePath) => {
-            const name = path.basename(filePath);
-            return name.startsWith('.') && name !== path.basename(DATE_FILE);
-        },
-        persistent: true,
-        ignoreInitial: true,
-        awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
-        usePolling: false,
-    });
-
-    watcher
-        .on('add', (filePath) => {
-            handleFileEvent(filePath);
-            scheduleMerge();
-        })
-        .on('change', (filePath) => {
-            if (path.basename(filePath) === path.basename(DATE_FILE)) {
-                handleDateRollover();
-            } else {
-                handleFileEvent(filePath);
-                scheduleMerge();        // ← NEW
-            }
-        })
-        // .on('unlink', handleFileEvent)
-        .on('error', error => console.error('Watcher error:', error));
-
-    watcher.on('ready', async () => {
-        console.log('Initial scan complete. Triggering startup merge...');
-        for (const rule of GROUP_RULES) {
-            pendingChanges.set(rule.output, new Set(rule.fileNames));
-
-        }
-        await processQueue();
-        console.log('Startup merge complete. Now watching for changes... Press Ctrl+C to stop.');
-
-        if (process.stdin.isTTY) {
-            process.stdin.pause();
-        }
-    });
-}
-
-
-
-const MERGE_FUNCTIONS = {
-    atmMerge,
+  return `${hh}:${mm}:${ss}`;
 };
 
-init()
+
+function QueueMetrics({ data, lastUpdated, missingByApp, mflag, currentByApp, date,  tpmtps, tpmtpsSingle}) {
+  const sourceData = data || {};
+
+  const keys = data?.queue_i?.keys || [];
+  const jobs1 = data?.queue_i?.queue_buildup_i || [];
+  const jobs2 = data?.queue_I?.queue_buildup_I || [];
+  const jobs3 = data?.queue_a?.queue_buildup_a || [];
+  const jobs4 = data?.queue_b?.queue_buildup_b || [];
+  const jobs5 = data?.queue_c?.queue_buildup_c || [];
+  const jobs6 = data?.queue_d?.queue_buildup_d || [];
+  const jobs7 = data?.queue_e?.queue_buildup_e || [];
+  const jobs8 = data?.queue_f?.queue_buildup_f || [];
+  const jobs9 = data?.queue_g?.queue_buildup_g || [];
+  const jobs10 = data?.queue_h?.queue_buildup_h || [];
+  const jobs11 = data?.queue_j?.queue_buildup_j || [];
+  const jobs12 = data?.queue_k?.queue_buildup_k || [];
+  const jobs13 = data?.queue_m?.queue_buildup_m || [];
+  const jobs14 = data?.queue_n?.queue_buildup_n || [];
+  const jobs15 = data?.queue_p?.queue_buildup_p || [];
+  const jobs16 = data?.queue_q?.queue_buildup_q || [];
+
+
+
+  const JOBS = [jobs1, jobs2, jobs3, jobs4, jobs5, jobs6, jobs7, jobs8, jobs9, jobs10, jobs11, jobs12, jobs13, jobs14, jobs15, jobs16]
+  // console.log(JOBS);
+
+
+  
+  const queueKeys = Object.keys(sourceData)
+  const columns = Array.from({ length: 16 }, (_, i) => i === 0 ? "M" : `S${i}`);
+
+  const maxLen = Math.max(...JOBS.map(a => a.length));
+
+
+  const lastUpdatedTime = sourceData["lastUpdatedTime"] ? sourceData["lastUpdatedTime"] : lastUpdated;
+
+  const tpsSingle = tpmtpsSingle ? tpmtpsSingle["tpsSingle"] : "";
+  const timeTps  = tpsSingle ? fromatTime((tpsSingle.split(" "))[2]) : ""
+  const actualTps = tpsSingle ? (tpsSingle.split(" "))[0] : ""
+  const THRESHOLD = 100;
+
+  const sortedKeys = useMemo(() => {
+    const rowMax = (key) => {
+      const row = sourceData[key];
+      if (!Array.isArray(row)) return -Infinity;
+      return row.reduce((m, v) => (typeof v === "number" && v > m ? v : m), -Infinity);
+    };
+
+    const isBottom = (key) => BOTTOM_KEYS.includes(key.toUpperCase());
+    const normal = queueKeys.filter((k) => !isBottom(k));
+    normal.sort((a, b) => {
+      const aHot = rowMax(a) >= THRESHOLD;
+      const bHot = rowMax(b) >= THRESHOLD;
+      if (aHot && bHot) return rowMax(b) - rowMax(a);
+      if (aHot) return -1;
+      if (bHot) return 1;
+      return 0;
+    });
+
+    const bottom = BOTTOM_KEYS
+      .map((bk) => queueKeys.find((k) => k.toUpperCase() === bk))
+      .filter(Boolean);
+    return [...normal, ...bottom];
+
+  }, [data]);
+  const [showPopup, setShowPopup] = useState(false);
+  const [showPopup2, setShowPopup2] = useState(false);
+  const [showPopup3, setShowPopup3] = useState(false);
+  const [showPopup4, setShowPopup4] = useState(false);
+
+
+  const [queue, setQueue] = useState(null);
+  const [server, setServer] = useState(null);
+  const [repServ, setRepServ] = useState(null);
+
+  const repKey = Object.keys(missingByApp)
+  const appsWithZero = Object.keys(currentByApp)
+
+  function DateFormatter(mflag) {
+    if (mflag === null || mflag === undefined) return;
+    const year = mflag.slice(0, 4)
+    const month = mflag.slice(4, 6)
+    const day = mflag.slice(6, 8)
+
+    return `${day}/${month}/${year}`
+  }
+
+  // console.log(date)
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+      <div className="queuecard">
+        <div className="card-header border-b border-[var(--border-color)] pb-4 mb-0 flex justify-between">
+          <div className="card-title text-[14px]">
+            <IconList />
+            <h2 className="text-[14px]">QUEUE BUILDUP</h2>
+          </div>
+          {/* <div className="tps">
+            <button style={{ cursor: "pointer" }} onClick={() => {
+              setShowPopup4(true);
+            }}  >TPS : {actualTps} AT {timeTps}</button>
+          </div> */}
+          <div className="flex items-center gap-6 text-[12px] font-semibold text-secondary" style={{ display: 'flex', alignItems: 'center', gap: '24px', fontSize: '11px', color: 'var(--text-secondary)' }}>
+            <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+              <span className="flex items-center gap-2" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><div style={{ width: 8, height: 8, borderRadius: '50%', background: '#484f58', display: 'inline-block' }}></div> ZERO</span>
+              <span className="flex items-center gap-2" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-orange)', display: 'inline-block' }}></div> 200-499</span>
+              <span className="flex items-center gap-2" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-red)', display: 'inline-block' }}></div> 500+</span>
+            </div>
+            <div className="timestamp">
+              <p><span>•</span> {date === mflag ? lastUpdatedTime : (DateFormatter(date))}</p>
+            </div>
+          </div>
+        </div>
+        <div className="table-wrap queue">
+          <table>
+            <thead>
+              <tr>
+                <th >QUEUE</th>
+                {columns.map((c) => <th style={{cursor: "pointer"}} key={c} onClick={() => { setShowPopup2(true); setServer(c); }}>{c}</th>)}
+              </tr>
+              <tr>
+                <th>STATUS</th>
+                {columns.map((c) => {
+                  if (appsWithZero.includes(SERVERS[c])) {
+                    return (
+                      <th style={{cursor: "pointer"}} key={c} onClick={() => { setShowPopup3(true); setRepServ(c); }}><IconError /></th>
+                    )
+                  }
+                  if (repKey.includes(SERVERS[c])) {
+                    return (
+                      <th style={{cursor: "pointer"}} key={c} onClick={() => { setShowPopup3(true); setRepServ(c); }}><IconWarning /></th>
+                    )
+                  } else {
+                    return (
+                      <th  style={{cursor: "pointer"}} key={c}><IconCheck /></th>
+                    )
+                  }
+                }
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {/* {queueKeys.length > 0 ? (
+                sortedKeys.map((key) => {
+                  if (key === "lastUpdatedTime" ){return}
+                  const rowData = sourceData[key];
+                  return (
+                    <tr key={key} >
+                      <td className="queues" onClick={() => {
+                        setShowPopup(true);
+                        setQueue(key);
+                      }}>{key.toUpperCase()}</td>
+                      {Array.isArray(rowData)
+                        ? rowData.map((val, i) => (
+                          <QueueAnimatedCell key={i} value={val} />
+                        ))
+                        : null}
+                    </tr>
+                  );
+                })
+              ) : (
+                <tr>
+                  <td colSpan={14} className="text-center opacity-50">Waiting for data...</td>
+                </tr>
+              )} */}
+
+                          {
+              Array.from({ length: maxLen }, (_, i) => (
+                <tr key={i} className="queues" onClick={() => {
+                        setShowPopup(true);
+                        setQueue(keys[i]);
+                      }}>
+                  <td>{keys[i]}</td>
+                  {JOBS.map((arr, j) => (
+                    <QueueAnimatedCell value = {arr[i]} k= {j} i={i}/>                                                                                                                                                                      
+                    // <td key={j}>{arr[i]}</td>
+                  ))}
+                </tr>
+              ))
+            }
+            </tbody>
+          </table>
+          {showPopup && (
+            <div className="popup-overlay" onClick={() => setShowPopup(false)}>
+              <div className="popup-content" onClick={(e) => e.stopPropagation()}>
+                <QueueReplica queue={queue} mflag={date}  region={"D"} />
+                <button className="close-button" onClick={() => setShowPopup(false)}><IconCross /></button>
+              </div>
+            </div>
+          )}
+          {showPopup2 && (
+            <div className="popup-overlay" onClick={() => setShowPopup2(false)}>
+              <div className="popup-content" onClick={(e) => e.stopPropagation()}>
+                <PaceBuildup server={server} region={"D"} mflag={date}/>
+                <button className="close-button" onClick={() => setShowPopup2(false)}><IconCross /></button>
+              </div>
+            </div>
+          )}
+          {showPopup3 && (
+            <div className="popup-overlay" onClick={() => setShowPopup3(false)}>
+              <div className="popup-content" onClick={(e) => e.stopPropagation()}>
+                <ReplicaStatus repServ={SERVERS[repServ]} missingByApp={missingByApp} server={repServ} region={"D"} />
+                <button className="close-button" onClick={() => setShowPopup3(false)}><IconCross /></button>
+              </div>
+            </div>
+          )}
+                    {showPopup4 && (
+            <div className="popup-overlay" onClick={() => setShowPopup4(false)}>
+              <div className="popup-content" onClick={(e) => e.stopPropagation()}>
+                <TpmTps tpmtps={tpmtps} date={date} />
+                <button className="close-button" onClick={() => setShowPopup4(false)}><IconCross /></button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+export default React.memo(QueueMetrics);
