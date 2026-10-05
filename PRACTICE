@@ -130,6 +130,43 @@ function QueueMetrics({ data, lastUpdated, missingByApp, mflag, currentByApp, da
     return [...normal, ...bottom];
 
   }, [data]);
+
+  // Same sorting rules as sortedKeys, but applied to the 16 jobs data (JOBS).
+  // Each table row i = keys[i] + JOBS[0..15][i]. We sort the row indexes:
+  //  1. rows whose highest value >= THRESHOLD come first (highest first)
+  //  2. all other rows keep their original order
+  //  3. BOTTOM_KEYS rows are always pushed to the bottom (in BOTTOM_KEYS order)
+  const sortedRowIndexes = useMemo(() => {
+    const rowMax = (i) =>
+      JOBS.reduce((m, arr) => {
+        const n = Number(arr[i]); // "NQKE" -> NaN -> ignored
+        return Number.isFinite(n) && n > m ? n : m;
+      }, -Infinity);
+
+    const keyAt = (i) => (keys[i] || "").toUpperCase();
+    const isBottom = (i) => BOTTOM_KEYS.includes(keyAt(i));
+
+    const allIdx = Array.from({ length: maxLen }, (_, i) => i);
+    const normal = allIdx.filter((i) => !isBottom(i));
+
+    normal.sort((a, b) => {
+      const aMax = rowMax(a);
+      const bMax = rowMax(b);
+      const aHot = aMax >= THRESHOLD;
+      const bHot = bMax >= THRESHOLD;
+      if (aHot && bHot) return bMax - aMax;
+      if (aHot) return -1;
+      if (bHot) return 1;
+      return 0;
+    });
+
+    const bottom = BOTTOM_KEYS
+      .map((bk) => allIdx.find((i) => keyAt(i) === bk))
+      .filter((i) => i !== undefined); // (not filter(Boolean): index 0 is valid)
+
+    return [...normal, ...bottom];
+  }, [data]);
+
   const [showPopup, setShowPopup] = useState(false);
   const [showPopup2, setShowPopup2] = useState(false);
   const [showPopup3, setShowPopup3] = useState(false);
@@ -231,20 +268,22 @@ function QueueMetrics({ data, lastUpdated, missingByApp, mflag, currentByApp, da
                 </tr>
               )} */}
 
-                          {
-              Array.from({ length: maxLen }, (_, i) => (
-                <tr key={i} className="queues" onClick={() => {
-                        setShowPopup(true);
-                        setQueue(keys[i]);
-                      }}>
-                  <td>{keys[i]}</td>
-                  {JOBS.map((arr, j) => (
-                    <QueueAnimatedCell value = {arr[i]} k= {j} i={i}/>                                                                                                                                                                      
-                    // <td key={j}>{arr[i]}</td>
-                  ))}
-                </tr>
-              ))
-            }
+              {
+                // i = original row index (also used as the stable key, so the
+                // highlight animation still follows the same queue when rows move)
+                sortedRowIndexes.map((i) => (
+                  <tr key={i} className="queues" onClick={() => {
+                    setShowPopup(true);
+                    setQueue(keys[i]);
+                  }}>
+                    <td>{keys[i]}</td>
+                    {JOBS.map((arr, j) => (
+                      <QueueAnimatedCell key={j} value={arr[i]} k={j} i={i} />
+                      // <td key={j}>{arr[i]}</td>
+                    ))}
+                  </tr>
+                ))
+              }
             </tbody>
           </table>
           {showPopup && (
@@ -271,7 +310,7 @@ function QueueMetrics({ data, lastUpdated, missingByApp, mflag, currentByApp, da
               </div>
             </div>
           )}
-                    {showPopup4 && (
+          {showPopup4 && (
             <div className="popup-overlay" onClick={() => setShowPopup4(false)}>
               <div className="popup-content" onClick={(e) => e.stopPropagation()}>
                 <TpmTps tpmtps={tpmtps} date={date} />
