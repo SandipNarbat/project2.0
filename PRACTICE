@@ -1,326 +1,137 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
-import { IconList, IconThumbDown, IconCross, IconCheck, IconWarning, IconError } from "./Icons";
-// import { useState } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
-import QueueReplica from "../blocks/QueueReplica";
-import PaceBuildup from "../blocks/PaceBuildup";
-import ReplicaStatus from "../blocks/ReplicaStatus";
-import TpmTps from "../blocks/TpmTps";
+<!-- QUEUE BUILDUP BEEP START -->
+<audio id="queueBuildupBeep"
+src="beep.mp3"
+preload="auto"></audio>
+<script type="text/javascript">
+var queueBeepInterval = null;
+var queueBeepUnlocked = false;
 
-function getPillClass(val) {
-  // console.log(val)
-  if(val === "NQKE") return;
-  if (Number(val) === 0) return "pill pill-zero";
-  if (Number(val) <= 99) return "pill pill-zero";
-  if (Number(val) <= 499) return "pill pill-orange";
-  return "pill pill-red";
+/* ==========================================
+PLAY BEEP
+========================================== /
+function playQueueBeep() {
+var beep = document.getElementById("queueBuildupBeep");
+if (!beep) {
+console.log("QUEUE BEEP: audio not found");
+return;
 }
-
-const SERVERS = {
-  "M": "i",
-  "S1": "I",
-  "S2": "a",
-  "S3": "b",
-  "S4": "c",
-  "S5": "d",
-  "S6": "e",
-  "S7": "f",
-  "S8": "g",
-  "S9": "h",
-  "S10": "j",
-  "S11": "k",
-  "S12": "m",
-  "S13": "n",
-  "S14": "p",
-  "S15": "q",
-}
-
-const BOTTOM_KEYS = ["CTAQ", "CRCQ", "ONLQ", "CTDQ", "PF1Q", "RESPQ", "SDVQ", "VV1Q", "VV2Q", "VV3Q", "ARCQ", "KCCQ", "FA1Q", "SFDQ", "GLAQ"];
-const QueueAnimatedCell = React.memo(function QueueAnimatedCell({ value, k , i}) {
-  const [highlight, setHighlight] = useState(false);
-  const prev = useRef(value);
-  useEffect(() => {
-    if (prev.current !== value) {
-      setHighlight(true);
-      const timer = setTimeout(() => setHighlight(false), 800);
-      prev.current = value;
-      return () => clearTimeout(timer);
-    }
-  }, [value]);
-  return (
-    <td className={highlight ? "highlight-row" : ""}>
-      <span className={getPillClass(value)}>{value === "NQKE" ? <IconThumbDown /> : Number(value) < 99 ? 0 : value}</span>
-    </td>
-  );
+beep.pause();
+beep.currentTime = 0;
+beep.play().then(function() {
+console.log("QUEUE BEEP: PLAYING");
+}).catch(function(error) {
+console.log("QUEUE BEEP: PLAY BLOCKED");
+console.log(error);
 });
-
-
-const fromatTime = (dateInput) => {
-  if (dateInput === "" || dateInput === undefined) return;
-  const hh = dateInput.slice(0, 2);
-  const mm = dateInput.slice(2, 4);
-  const ss = dateInput.slice(4,);
-
-  return `${hh}:${mm}:${ss}`;
-};
-
-
-function QueueMetrics({ data, lastUpdated, missingByApp, mflag, currentByApp, date,  tpmtps, tpmtpsSingle}) {
-  const sourceData = data || {};
-
-  const keys = data?.queue_i?.keys || [];
-  const jobs1 = data?.queue_i?.queue_buildup_i || [];
-  const jobs2 = data?.queue_I?.queue_buildup_I || [];
-  const jobs3 = data?.queue_a?.queue_buildup_a || [];
-  const jobs4 = data?.queue_b?.queue_buildup_b || [];
-  const jobs5 = data?.queue_c?.queue_buildup_c || [];
-  const jobs6 = data?.queue_d?.queue_buildup_d || [];
-  const jobs7 = data?.queue_e?.queue_buildup_e || [];
-  const jobs8 = data?.queue_f?.queue_buildup_f || [];
-  const jobs9 = data?.queue_g?.queue_buildup_g || [];
-  const jobs10 = data?.queue_h?.queue_buildup_h || [];
-  const jobs11 = data?.queue_j?.queue_buildup_j || [];
-  const jobs12 = data?.queue_k?.queue_buildup_k || [];
-  const jobs13 = data?.queue_m?.queue_buildup_m || [];
-  const jobs14 = data?.queue_n?.queue_buildup_n || [];
-  const jobs15 = data?.queue_p?.queue_buildup_p || [];
-  const jobs16 = data?.queue_q?.queue_buildup_q || [];
-
-
-
-  const JOBS = [jobs1, jobs2, jobs3, jobs4, jobs5, jobs6, jobs7, jobs8, jobs9, jobs10, jobs11, jobs12, jobs13, jobs14, jobs15, jobs16]
-  // console.log(JOBS);
-
-
-  
-  const queueKeys = Object.keys(sourceData)
-  const columns = Array.from({ length: 16 }, (_, i) => i === 0 ? "M" : `S${i}`);
-
-  const maxLen = Math.max(...JOBS.map(a => a.length));
-
-
-  const lastUpdatedTime = sourceData["lastUpdatedTime"] ? sourceData["lastUpdatedTime"] : lastUpdated;
-
-  const tpsSingle = tpmtpsSingle ? tpmtpsSingle["tpsSingle"] : "";
-  const timeTps  = tpsSingle ? fromatTime((tpsSingle.split(" "))[2]) : ""
-  const actualTps = tpsSingle ? (tpsSingle.split(" "))[0] : ""
-  const THRESHOLD = 100;
-
-  const sortedKeys = useMemo(() => {
-    const rowMax = (key) => {
-      const row = sourceData[key];
-      if (!Array.isArray(row)) return -Infinity;
-      return row.reduce((m, v) => (typeof v === "number" && v > m ? v : m), -Infinity);
-    };
-
-    const isBottom = (key) => BOTTOM_KEYS.includes(key.toUpperCase());
-    const normal = queueKeys.filter((k) => !isBottom(k));
-    normal.sort((a, b) => {
-      const aHot = rowMax(a) >= THRESHOLD;
-      const bHot = rowMax(b) >= THRESHOLD;
-      if (aHot && bHot) return rowMax(b) - rowMax(a);
-      if (aHot) return -1;
-      if (bHot) return 1;
-      return 0;
-    });
-
-    const bottom = BOTTOM_KEYS
-      .map((bk) => queueKeys.find((k) => k.toUpperCase() === bk))
-      .filter(Boolean);
-    return [...normal, ...bottom];
-
-  }, [data]);
-
-  // Same sorting rules as sortedKeys, but applied to the 16 jobs data (JOBS).
-  // Each table row i = keys[i] + JOBS[0..15][i]. We sort the row indexes:
-  //  1. rows whose highest value >= THRESHOLD come first (highest first)
-  //  2. all other rows keep their original order
-  //  3. BOTTOM_KEYS rows are always pushed to the bottom (in BOTTOM_KEYS order)
-  const sortedRowIndexes = useMemo(() => {
-    const rowMax = (i) =>
-      JOBS.reduce((m, arr) => {
-        const n = Number(arr[i]); // "NQKE" -> NaN -> ignored
-        return Number.isFinite(n) && n > m ? n : m;
-      }, -Infinity);
-
-    const keyAt = (i) => (keys[i] || "").toUpperCase();
-    const isBottom = (i) => BOTTOM_KEYS.includes(keyAt(i));
-
-    const allIdx = Array.from({ length: maxLen }, (_, i) => i);
-    const normal = allIdx.filter((i) => !isBottom(i));
-
-    normal.sort((a, b) => {
-      const aMax = rowMax(a);
-      const bMax = rowMax(b);
-      const aHot = aMax >= THRESHOLD;
-      const bHot = bMax >= THRESHOLD;
-      if (aHot && bHot) return bMax - aMax;
-      if (aHot) return -1;
-      if (bHot) return 1;
-      return 0;
-    });
-
-    const bottom = BOTTOM_KEYS
-      .map((bk) => allIdx.find((i) => keyAt(i) === bk))
-      .filter((i) => i !== undefined); // (not filter(Boolean): index 0 is valid)
-
-    return [...normal, ...bottom];
-  }, [data]);
-
-  const [showPopup, setShowPopup] = useState(false);
-  const [showPopup2, setShowPopup2] = useState(false);
-  const [showPopup3, setShowPopup3] = useState(false);
-  const [showPopup4, setShowPopup4] = useState(false);
-
-
-  const [queue, setQueue] = useState(null);
-  const [server, setServer] = useState(null);
-  const [repServ, setRepServ] = useState(null);
-
-  const repKey = Object.keys(missingByApp)
-  const appsWithZero = Object.keys(currentByApp)
-
-  function DateFormatter(mflag) {
-    if (mflag === null || mflag === undefined) return;
-    const year = mflag.slice(0, 4)
-    const month = mflag.slice(4, 6)
-    const day = mflag.slice(6, 8)
-
-    return `${day}/${month}/${year}`
-  }
-
-  // console.log(date)
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-      <div className="queuecard">
-        <div className="card-header border-b border-[var(--border-color)] pb-4 mb-0 flex justify-between">
-          <div className="card-title text-[14px]">
-            <IconList />
-            <h2 className="text-[14px]">QUEUE BUILDUP</h2>
-          </div>
-          {/* <div className="tps">
-            <button style={{ cursor: "pointer" }} onClick={() => {
-              setShowPopup4(true);
-            }}  >TPS : {actualTps} AT {timeTps}</button>
-          </div> */}
-          <div className="flex items-center gap-6 text-[12px] font-semibold text-secondary" style={{ display: 'flex', alignItems: 'center', gap: '24px', fontSize: '11px', color: 'var(--text-secondary)' }}>
-            <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-              <span className="flex items-center gap-2" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><div style={{ width: 8, height: 8, borderRadius: '50%', background: '#484f58', display: 'inline-block' }}></div> ZERO</span>
-              <span className="flex items-center gap-2" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-orange)', display: 'inline-block' }}></div> 200-499</span>
-              <span className="flex items-center gap-2" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-red)', display: 'inline-block' }}></div> 500+</span>
-            </div>
-            <div className="timestamp">
-              <p><span>•</span> {date === mflag ? lastUpdatedTime : (DateFormatter(date))}</p>
-            </div>
-          </div>
-        </div>
-        <div className="table-wrap queue">
-          <table>
-            <thead>
-              <tr>
-                <th >QUEUE</th>
-                {columns.map((c) => <th style={{cursor: "pointer"}} key={c} onClick={() => { setShowPopup2(true); setServer(c); }}>{c}</th>)}
-              </tr>
-              <tr>
-                <th>STATUS</th>
-                {columns.map((c) => {
-                  if (appsWithZero.includes(SERVERS[c])) {
-                    return (
-                      <th style={{cursor: "pointer"}} key={c} onClick={() => { setShowPopup3(true); setRepServ(c); }}><IconError /></th>
-                    )
-                  }
-                  if (repKey.includes(SERVERS[c])) {
-                    return (
-                      <th style={{cursor: "pointer"}} key={c} onClick={() => { setShowPopup3(true); setRepServ(c); }}><IconWarning /></th>
-                    )
-                  } else {
-                    return (
-                      <th  style={{cursor: "pointer"}} key={c}><IconCheck /></th>
-                    )
-                  }
-                }
-                )}
-              </tr>
-            </thead>
-            <tbody>
-              {/* {queueKeys.length > 0 ? (
-                sortedKeys.map((key) => {
-                  if (key === "lastUpdatedTime" ){return}
-                  const rowData = sourceData[key];
-                  return (
-                    <tr key={key} >
-                      <td className="queues" onClick={() => {
-                        setShowPopup(true);
-                        setQueue(key);
-                      }}>{key.toUpperCase()}</td>
-                      {Array.isArray(rowData)
-                        ? rowData.map((val, i) => (
-                          <QueueAnimatedCell key={i} value={val} />
-                        ))
-                        : null}
-                    </tr>
-                  );
-                })
-              ) : (
-                <tr>
-                  <td colSpan={14} className="text-center opacity-50">Waiting for data...</td>
-                </tr>
-              )} */}
-
-              {
-                // i = original row index (also used as the stable key, so the
-                // highlight animation still follows the same queue when rows move)
-                sortedRowIndexes.map((i) => (
-                  <tr key={i} className="queues" onClick={() => {
-                    setShowPopup(true);
-                    setQueue(keys[i]);
-                  }}>
-                    <td>{keys[i]}</td>
-                    {JOBS.map((arr, j) => (
-                      <QueueAnimatedCell key={j} value={arr[i]} k={j} i={i} />
-                      // <td key={j}>{arr[i]}</td>
-                    ))}
-                  </tr>
-                ))
-              }
-            </tbody>
-          </table>
-          {showPopup && (
-            <div className="popup-overlay" onClick={() => setShowPopup(false)}>
-              <div className="popup-content" onClick={(e) => e.stopPropagation()}>
-                <QueueReplica queue={queue} mflag={date}  region={"D"} />
-                <button className="close-button" onClick={() => setShowPopup(false)}><IconCross /></button>
-              </div>
-            </div>
-          )}
-          {showPopup2 && (
-            <div className="popup-overlay" onClick={() => setShowPopup2(false)}>
-              <div className="popup-content" onClick={(e) => e.stopPropagation()}>
-                <PaceBuildup server={server} region={"D"} mflag={date}/>
-                <button className="close-button" onClick={() => setShowPopup2(false)}><IconCross /></button>
-              </div>
-            </div>
-          )}
-          {showPopup3 && (
-            <div className="popup-overlay" onClick={() => setShowPopup3(false)}>
-              <div className="popup-content" onClick={(e) => e.stopPropagation()}>
-                <ReplicaStatus repServ={SERVERS[repServ]} missingByApp={missingByApp} server={repServ} region={"D"} />
-                <button className="close-button" onClick={() => setShowPopup3(false)}><IconCross /></button>
-              </div>
-            </div>
-          )}
-          {showPopup4 && (
-            <div className="popup-overlay" onClick={() => setShowPopup4(false)}>
-              <div className="popup-content" onClick={(e) => e.stopPropagation()}>
-                <TpmTps tpmtps={tpmtps} date={date} />
-                <button className="close-button" onClick={() => setShowPopup4(false)}><IconCross /></button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
 }
-export default React.memo(QueueMetrics);
+
+/* ==========================================
+CHECK FOR 500+ VALUE
+========================================== /
+function checkQueueBeep() {
+var trigger =
+document.querySelector("#alldiv .queueBeepTrigger");
+if (trigger) {
+console.log("QUEUE BEEP: 500+ DETECTED");
+if (queueBeepUnlocked) {
+startQueueBeep();
+}
+} else {
+stopQueueBeep();
+}
+}
+
+/* ==========================================
+START BEEP EVERY 5 SECONDS
+========================================== /
+function startQueueBeep() {
+if (queueBeepInterval !== null) {
+return;
+}
+console.log("QUEUE BEEP: STARTED");
+/* First beep /
+playQueueBeep();
+
+/* Every 5 seconds /
+queueBeepInterval = setInterval(function() {
+var trigger =
+document.querySelector("#alldiv .queueBeepTrigger");
+/* If 500+ disappeared, stop /
+if (!trigger) {
+stopQueueBeep();
+return;
+}
+playQueueBeep();
+}, 3000);
+}
+
+/* ==========================================
+STOP BEEP
+========================================== /
+function stopQueueBeep() {
+if (queueBeepInterval !== null) {
+clearInterval(queueBeepInterval);
+queueBeepInterval = null;
+console.log("QUEUE BEEP: STOPPED");
+}
+var beep =
+document.getElementById("queueBuildupBeep");
+if (beep) {
+beep.pause();
+beep.currentTime = 0;
+}
+}
+
+/* ==========================================
+UNLOCK AUDIO
+========================================== /
+function unlockQueueBeep() {
+var beep = document.getElementById("queueBuildupBeep");
+if (!beep) {
+console.log("QUEUE BEEP: AUDIO NOT FOUND");
+return;
+}
+queueBeepUnlocked = true;
+console.log("QUEUE BEEP: AUTOMATIC MODE ENABLED");
+checkQueueBeep();
+}
+// Start automatically - no user interaction
+unlockQueueBeep();
+/* ==========================================
+FIRST USER INTERACTION
+========================================== /
+document.addEventListener(
+"click",
+unlockQueueBeep,
+{ once: true }
+);
+document.addEventListener(
+"keydown",
+unlockQueueBeep,
+{ once: true }
+);
+
+/* ==========================================
+INITIAL CHECK
+========================================== /
+document.addEventListener(
+"DOMContentLoaded",
+function() {
+checkQueueBeep();
+}
+);
+</script>
+<!-- QUEUE BUILDUP BEEP END -->
+
+</html>
+<?php
+/}
+else {
+$err="Un-Authenticated Access Try Again!!";
+header("location:../index.php?status=err=$err");
+}/
+?>
+
+Thanks & Regards,
+Aman Gupta
+Tata Consultancy Services
