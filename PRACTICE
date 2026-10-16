@@ -1,137 +1,274 @@
-<!-- QUEUE BUILDUP BEEP START -->
-<audio id="queueBuildupBeep"
-src="beep.mp3"
-preload="auto"></audio>
-<script type="text/javascript">
-var queueBeepInterval = null;
-var queueBeepUnlocked = false;
+import React, { useMemo, useState } from "react";
 
-/* ==========================================
-PLAY BEEP
-========================================== /
-function playQueueBeep() {
-var beep = document.getElementById("queueBuildupBeep");
-if (!beep) {
-console.log("QUEUE BEEP: audio not found");
-return;
-}
-beep.pause();
-beep.currentTime = 0;
-beep.play().then(function() {
-console.log("QUEUE BEEP: PLAYING");
-}).catch(function(error) {
-console.log("QUEUE BEEP: PLAY BLOCKED");
-console.log(error);
-});
+import {
+  ResponsiveContainer,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+} from "recharts";
+
+import "./Flow.css";
+
+export default function Flow() {
+  // Your existing data structure
+  const data = [
+    [
+      "TIME", "CASQ", "CIFQ", "CIFQ A", "CIFQ I",
+      "CIFQ M", "CIRQ", "DEPQ", "DEPQ A", "DEPQ I",
+      "DEPQ M", "DP1Q", "DP1Q A", "DP1Q I", "DP1Q M"
+    ],
+    [
+      "06:32:54.297.949",
+      "NONE", "0", "0", "0", "NONE",
+      "0", "0", "0", "0", "0", "0", "0", "0", "NONE"
+    ],
+    [
+      "06:33:09.860.658",
+      "NONE", "0", "0", "0", "NONE",
+      "0", "0", "0", "0", "0", "0", "0", "0", "NONE"
+    ],
+    [
+      "11:48:55.618.054",
+      "0", "59", "0", "0", "0",
+      "0", "42", "0", "0", "0", "0", "0", "0", "0"
+    ],
+    [
+      "11:49:16.161.034",
+      "0", "306", "0", "0", "0",
+      "0", "177", "0", "0", "0", "0", "0", "0", "0"
+    ],
+    [
+      "11:49:34.462.984",
+      "0", "0", "0", "0", "0",
+      "0", "233", "0", "0", "0", "0", "0", "0", "0"
+    ],
+    [
+      "12:24:53.529.381",
+      "0", "107", "0", "0", "0",
+      "0", "97", "0", "0", "0", "0", "0", "0", "0"
+    ],
+    [
+      "12:25:12.287.991",
+      "0", "29", "0", "0", "0",
+      "0", "168", "0", "0", "0", "0", "0", "0", "0"
+    ],
+    [
+      "12:25:28.883.056",
+      "0", "0", "0", "0", "0",
+      "0", "112", "0", "0", "0", "0", "0", "0", "0"
+    ],
+  ];
+
+  const [hiddenQueues, setHiddenQueues] = useState([]);
+
+  // Convert your 2D array into objects for Recharts
+  const { chartData, queueNames } = useMemo(() => {
+    const headers = data[0].map((header) => header.trim());
+
+    const rows = data.slice(1).map((row) => {
+      const item = {};
+
+      headers.forEach((header, index) => {
+        const value = row[index]?.toString().trim();
+
+        if (header === "TIME") {
+          item.time = value;
+        } else {
+          const number = Number(value);
+
+          item[header] =
+            value === "" || value === "NONE" || !Number.isFinite(number)
+              ? null
+              : number;
+        }
+      });
+
+      return item;
+    });
+
+    return {
+      chartData: rows,
+      queueNames: headers.filter((header) => header !== "TIME"),
+    };
+  }, []);
+
+  const toggleQueue = (queue) => {
+    setHiddenQueues((previous) =>
+      previous.includes(queue)
+        ? previous.filter((item) => item !== queue)
+        : [...previous, queue]
+    );
+  };
+
+  return (
+    <div className="flow-dashboard">
+      <div className="flow-header">
+        <div>
+          <h2>Queue Buildup Analytics</h2>
+          <p>Detailed queue count trends by timestamp</p>
+        </div>
+
+        <span className="live-status">
+          <span className="status-dot" />
+          Monitoring
+        </span>
+      </div>
+
+      <div className="flow-chart-container">
+        <ResponsiveContainer width="100%" height={420}>
+          <LineChart
+            data={chartData}
+            margin={{ top: 15, right: 25, left: 5, bottom: 15 }}
+          >
+            <CartesianGrid
+              stroke="#303744"
+              strokeDasharray="3 3"
+              vertical={false}
+            />
+
+            <XAxis
+              dataKey="time"
+              stroke="#929bad"
+              tick={{ fill: "#aab3c2", fontSize: 11 }}
+              tickLine={false}
+              axisLine={{ stroke: "#414957" }}
+              minTickGap={25}
+            />
+
+            <YAxis
+              stroke="#929bad"
+              tick={{ fill: "#aab3c2", fontSize: 11 }}
+              tickLine={false}
+              axisLine={false}
+              allowDecimals={false}
+            />
+
+            <Tooltip
+              contentStyle={{
+                backgroundColor: "#171d27",
+                border: "1px solid #414957",
+                borderRadius: "8px",
+                color: "#ffffff",
+              }}
+              labelStyle={{
+                color: "#ffffff",
+                marginBottom: "8px",
+              }}
+              formatter={(value, name) => [
+                value == null ? "No data" : value,
+                name,
+              ]}
+              labelFormatter={(label) => `Time: ${label}`}
+            />
+
+            <Legend
+              wrapperStyle={{
+                paddingTop: "15px",
+                color: "#d5dbe5",
+                fontSize: "12px",
+              }}
+              onClick={(entry) => toggleQueue(entry.dataKey)}
+            />
+
+            {queueNames.map((queue, index) => (
+              <Line
+                key={queue}
+                type="monotone"
+                dataKey={queue}
+                name={queue}
+                stroke={`hsl(${(index * 47 + 150) % 360}, 75%, 60%)`}
+                strokeWidth={2}
+                dot={false}
+                activeDot={{ r: 5 }}
+                connectNulls={false}
+                hide={hiddenQueues.includes(queue)}
+                isAnimationActive={false}
+              />
+            ))}
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
 }
 
-/* ==========================================
-CHECK FOR 500+ VALUE
-========================================== /
-function checkQueueBeep() {
-var trigger =
-document.querySelector("#alldiv .queueBeepTrigger");
-if (trigger) {
-console.log("QUEUE BEEP: 500+ DETECTED");
-if (queueBeepUnlocked) {
-startQueueBeep();
-}
-} else {
-stopQueueBeep();
-}
+.flow-dashboard {
+  width: 100%;
+  padding: 22px;
+  background: #11151d;
+  border: 1px solid #29313d;
+  border-radius: 14px;
+  box-sizing: border-box;
+  color: #f1f5f9;
+  font-family: Arial, sans-serif;
 }
 
-/* ==========================================
-START BEEP EVERY 5 SECONDS
-========================================== /
-function startQueueBeep() {
-if (queueBeepInterval !== null) {
-return;
-}
-console.log("QUEUE BEEP: STARTED");
-/* First beep /
-playQueueBeep();
-
-/* Every 5 seconds /
-queueBeepInterval = setInterval(function() {
-var trigger =
-document.querySelector("#alldiv .queueBeepTrigger");
-/* If 500+ disappeared, stop /
-if (!trigger) {
-stopQueueBeep();
-return;
-}
-playQueueBeep();
-}, 3000);
+.flow-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
 }
 
-/* ==========================================
-STOP BEEP
-========================================== /
-function stopQueueBeep() {
-if (queueBeepInterval !== null) {
-clearInterval(queueBeepInterval);
-queueBeepInterval = null;
-console.log("QUEUE BEEP: STOPPED");
-}
-var beep =
-document.getElementById("queueBuildupBeep");
-if (beep) {
-beep.pause();
-beep.currentTime = 0;
-}
+.flow-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: #f8fafc;
 }
 
-/* ==========================================
-UNLOCK AUDIO
-========================================== /
-function unlockQueueBeep() {
-var beep = document.getElementById("queueBuildupBeep");
-if (!beep) {
-console.log("QUEUE BEEP: AUDIO NOT FOUND");
-return;
+.flow-header p {
+  margin: 7px 0 0;
+  font-size: 13px;
+  color: #929bad;
 }
-queueBeepUnlocked = true;
-console.log("QUEUE BEEP: AUTOMATIC MODE ENABLED");
-checkQueueBeep();
+
+.live-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px solid #285c47;
+  border-radius: 20px;
+  background: #142c24;
+  color: #72e6aa;
+  font-size: 12px;
+  white-space: nowrap;
 }
-// Start automatically - no user interaction
-unlockQueueBeep();
-/* ==========================================
-FIRST USER INTERACTION
-========================================== /
-document.addEventListener(
-"click",
-unlockQueueBeep,
-{ once: true }
-);
-document.addEventListener(
-"keydown",
-unlockQueueBeep,
-{ once: true }
-);
 
-/* ==========================================
-INITIAL CHECK
-========================================== /
-document.addEventListener(
-"DOMContentLoaded",
-function() {
-checkQueueBeep();
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #38d996;
+  box-shadow: 0 0 8px #38d996;
 }
-);
-</script>
-<!-- QUEUE BUILDUP BEEP END -->
 
-</html>
-<?php
-/}
-else {
-$err="Un-Authenticated Access Try Again!!";
-header("location:../index.php?status=err=$err");
-}/
-?>
+.flow-chart-container {
+  width: 100%;
+  min-width: 0;
+  padding-top: 10px;
+}
 
-Thanks & Regards,
-Aman Gupta
-Tata Consultancy Services
+@media (max-width: 600px) {
+  .flow-dashboard {
+    padding: 14px;
+  }
+
+  .flow-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .flow-header h2 {
+    font-size: 17px;
+  }
+}
+
+
+
