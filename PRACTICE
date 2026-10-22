@@ -271,4 +271,35 @@ export default function Flow() {
 }
 
 
+Vulnerabilities reported in Node.js and PHP:
+
+Node.js has also announced security releases for October 21, with HIGH-severity vulnerabilities affecting its 26.x, 24.x and 22.x release lines.
+
+HIGH severity security releases for 22, 24 and 26, landing today or right after. End-of-life versions get nothing.
+
+Node shipped 10 security fixes today plus the eMudhra CA block.
+
+• A flaw in Node's Brotli compression decoder lets an attacker run code remotely.
+• 3 bugs let attackers bypass HTTPS certificate checks (including using Unicode digits to fake IP addresses).
+• Single-executable Node apps were saving their random seed at build time, so every run generated the exact same "random" UUIDs.
+• Node hardcodes its own list of trusted CAs inside the binary, so updating Linux does not stop Node from trusting the leaked eMudhra keys.
+
+Real-world impact:
+Almost every modern web backend, API server, and CLI tool runs on Node. Until you update the Node binary itself, your backend can be tricked into trusting fake HTTPS servers (via eMudhra) or compromised by a crafted compressed request.
+
+
+The PHP Patch Plot Twist (8.5.12 / 8.4.27 / 8.3.36 / 8.2.35 out now)
+
+What happened:
+PHP's official advisory just dropped and revealed how the two bugs actually work:
+• Bug 1: Forcing PHP to run out of memory while parsing a request leaves internal memory half-built. When PHP cleans up the failed request, it executes that corrupted memory.
+• Bug 2: Crashing Request #1 leaves leftover pointers in the worker process, and Request #2 on that same worker trips over them before the new request even initializes.
+
+Real-world impact:
+WordPress, Magento, WooCommerce, and Laravel sites (~75% of the web runs PHP) can be taken over by a single HTTP request before your website's own code or security plugins even wake up.
+Wildest temporary fix from PHP's own advisory while you patch: set \`memory_limit = -1\` so attackers can't intentionally trigger the out-of-memory crash.
+
+If you run either stack in production, keep an eye on official advisories and apply patches promptly.  Security maintenance doesn't stop at your application code. Your runtime matters too.
+
+
 
